@@ -1,0 +1,17 @@
+# Airflow, for dags/ only. Separate from requirements.txt on purpose.
+#
+# Installing this without the matching constraints file resolves a different set of
+# transitive versions than the Airflow project tests against, so scripts/bootstrap-local.sh
+# passes the constraints URL and you should too:
+#
+#   pip install -r requirements-airflow.txt \
+#     --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.1.8/constraints-3.10.txt
+#
+# Nothing under contracts/, ingest/ or tests/ imports any of this. That is deliberate. A
+# clone can run the whole check suite with requirements.txt alone.
+apache-airflow==3.1.8
+
+# Imported directly by dags/nyc311_contract_check.py for the start_date. Airflow pulls it
+# in anyway, and an import you write is a dependency you declare. A package that is only
+# ever a transitive one disappears the day the parent drops it.
+pendulum==3.1.0

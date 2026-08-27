@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# The fetched corpus. 27 MB over 14 partitions and rebuildable in about 40 seconds with
+# scripts/pull_source.py. data/manifest.json is committed and carries a row count and a
+# sha256 for every partition, so a copy that does not match the published numbers is
+# something you can find out rather than something you have to trust.
+data/raw/
+
+# Local Airflow and dbt installs plus the Airflow home. scripts/teardown.sh removes them.
+/tmp/
+airflow.db
+airflow.cfg
+logs/

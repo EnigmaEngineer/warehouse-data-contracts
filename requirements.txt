@@ -1,0 +1,9 @@
+# PyYAML is the only thing the library needs. Contracts are YAML because dbt is YAML and
+# the two files end up being read by the same people.
+PyYAML==6.0.3
+
+# Airflow is deliberately NOT here. dags/ imports it and the checks in tests/ do not, so
+# a clone can run every check with just the line above. Airflow and dbt are installed by
+# scripts/bootstrap-local.sh into two separate directories, because resolving dbt into
+# Airflow's environment moves 21 packages that Airflow's own constraints file pinned.
+# Putting either in this file would make that collision look supported.
