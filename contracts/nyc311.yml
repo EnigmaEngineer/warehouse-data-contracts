@@ -1,0 +1,150 @@
+# Contract for NYC 311 Service Requests, dataset erm2-nwe9 on data.cityofnewyork.us.
+#
+# Written from the publisher's own column metadata before any row of the data was looked
+# at. That ordering is the point. A contract written by profiling the data cannot be
+# violated by the data, so it measures nothing.
+#
+# provenance: documented  the publisher says so, in the column description or the type
+# provenance: asserted    I decided it and the publisher never promised it
+#
+# Read the asserted ones as the interesting half. They are where a contract earns its
+# keep and they are also where it will be wrong.
+
+dataset: nyc311_service_requests
+
+source:
+  kind: socrata
+  domain: data.cityofnewyork.us
+  resource: erm2-nwe9
+  partition_column: created_date
+  partition_grain: day
+
+freshness:
+  # 311 is a live operational feed. Nothing in the metadata states a publishing SLA, so
+  # this number is mine.
+  max_lag_hours: 48
+  provenance: asserted
+
+volume:
+  # A quiet day in a city of eight million still generates thousands of requests. Floor
+  # set well below anything plausible so it catches a broken extract, not a slow Tuesday.
+  min_rows_per_partition: 4000
+  provenance: asserted
+
+# Cross column checks. These exist because the twenty single column constraints below
+# refused nothing at all on the first 179,314 real rows, and three relationships between
+# columns refused 584. A rule that reads one value at a time cannot see a request closed
+# before it was created.
+checks:
+  - name: closed_after_created
+    kind: ordering
+    before: created_date
+    after: closed_date
+    provenance: asserted
+    note: "nothing in the metadata says a closed date follows a created date"
+
+  - name: closed_request_has_a_closed_date
+    kind: requires_when
+    when_column: status
+    when_equals: Closed
+    then_required: closed_date
+    provenance: asserted
+    note: "the two columns describe the same event and nothing ties them together"
+
+  - name: open_request_has_no_closed_date
+    kind: forbids_when
+    when_column: status
+    when_in: [Open, Assigned, Pending, In Progress, Started]
+    then_absent: closed_date
+    provenance: asserted
+    note: "the mirror of the rule above. a request still in flight has not closed"
+
+columns:
+  - name: unique_key
+    type: string
+    provenance: documented
+    note: "described as the unique identifier of a service request"
+    required: true
+    unique: true
+
+  - name: created_date
+    type: timestamp
+    provenance: documented
+    note: "calendar_date in the published metadata, and it is the partition key"
+    required: true
+
+  - name: closed_date
+    type: timestamp
+    provenance: asserted
+    note: "an open request has no closed date, so this is nullable. the publisher does not say so"
+    required: false
+
+  - name: agency
+    type: string
+    provenance: documented
+    note: "acronym of the responding agency. the max_length is mine, acronyms are short"
+    required: true
+    max_length: 10
+
+  - name: complaint_type
+    type: string
+    provenance: documented
+    note: "first level of the topic hierarchy, defined by the responding agencies"
+    required: true
+
+  - name: descriptor
+    type: string
+    provenance: documented
+    note: "the metadata says these are not always required, so nullable"
+    required: false
+
+  - name: incident_zip
+    type: string
+    provenance: asserted
+    note: "documented as geo validated text. the five digit shape is my assumption"
+    required: false
+    matches: "^[0-9]{5}$"
+
+  - name: borough
+    type: string
+    provenance: asserted
+    note: "the publisher never enumerates these. list taken from the five boroughs"
+    required: true
+    allowed:
+      - BRONX
+      - BROOKLYN
+      - MANHATTAN
+      - QUEENS
+      - STATEN ISLAND
+      - Unspecified
+
+  - name: status
+    type: string
+    provenance: asserted
+    note: "no published vocabulary. this list is a guess at the workflow states"
+    required: true
+    allowed:
+      - Open
+      - Closed
+      - Assigned
+      - Pending
+      - In Progress
+      - Started
+      - Draft
+      - Unspecified
+
+  - name: latitude
+    type: number
+    provenance: asserted
+    note: "bounding box for the five boroughs, roughly. nullable because geocoding fails"
+    required: false
+    min: 40.4
+    max: 40.95
+
+  - name: longitude
+    type: number
+    provenance: asserted
+    note: "same bounding box"
+    required: false
+    min: -74.3
+    max: -73.7
