@@ -1,0 +1,137 @@
+{
+  "resource": "erm2-nwe9",
+  "columns": [
+    "unique_key",
+    "created_date",
+    "closed_date",
+    "agency",
+    "complaint_type",
+    "descriptor",
+    "incident_zip",
+    "borough",
+    "status",
+    "latitude",
+    "longitude"
+  ],
+  "partitions": [
+    {
+      "partition": "2025-01-01",
+      "rows": 10873,
+      "expected_rows": 10873,
+      "bytes": 1672370,
+      "sha256": "9cdce16f2bd769e97d2b9eea9e2cec3ab05826f77b5b765f4303b07f95a8687a",
+      "path": "raw/created_date=2025-01-01.csv"
+    },
+    {
+      "partition": "2025-01-02",
+      "rows": 13811,
+      "expected_rows": 13811,
+      "bytes": 2119078,
+      "sha256": "af3e7dcc8aeceea285e499b54b41284d78dc5513ad780ed92725bdf31f0a86d9",
+      "path": "raw/created_date=2025-01-02.csv"
+    },
+    {
+      "partition": "2025-01-03",
+      "rows": 11684,
+      "expected_rows": 11684,
+      "bytes": 1793346,
+      "sha256": "6a5fe525ae592b9b92f503fd54bb55d4b6340ac0cd7be9b736875c2aeb030535",
+      "path": "raw/created_date=2025-01-03.csv"
+    },
+    {
+      "partition": "2025-01-04",
+      "rows": 11459,
+      "expected_rows": 11459,
+      "bytes": 1757913,
+      "sha256": "c688dafc0f12b3568321553f7fe24549d22355fa2544112cc53de8d9c1b84b55",
+      "path": "raw/created_date=2025-01-04.csv"
+    },
+    {
+      "partition": "2025-01-05",
+      "rows": 13574,
+      "expected_rows": 13574,
+      "bytes": 2085460,
+      "sha256": "f9206308422b4de733870bba04ef8ea46b6a0c257ef58428fb103aa9cf08c416",
+      "path": "raw/created_date=2025-01-05.csv"
+    },
+    {
+      "partition": "2025-01-06",
+      "rows": 14141,
+      "expected_rows": 14141,
+      "bytes": 2158227,
+      "sha256": "9bf05cbc42312f7bb06d9b786cbe0b819f06936d7c3a4509ad03920709072c70",
+      "path": "raw/created_date=2025-01-06.csv"
+    },
+    {
+      "partition": "2025-01-07",
+      "rows": 15023,
+      "expected_rows": 15023,
+      "bytes": 2285557,
+      "sha256": "2ee6facfdd46a404789079e8215fc55192e58b1d2285138278b2c6f25e9df1d3",
+      "path": "raw/created_date=2025-01-07.csv"
+    },
+    {
+      "partition": "2025-01-08",
+      "rows": 13319,
+      "expected_rows": 13319,
+      "bytes": 2030530,
+      "sha256": "8cc8482e871d33fa14d0ab148d003e7ba5c0e5014bf4535442c8f507e486a8cd",
+      "path": "raw/created_date=2025-01-08.csv"
+    },
+    {
+      "partition": "2025-01-09",
+      "rows": 14906,
+      "expected_rows": 14906,
+      "bytes": 2274844,
+      "sha256": "2eff0db4ac72f13120c1303e7a407e7a276a32e34be72e289ccd9d0bc7ca7d3c",
+      "path": "raw/created_date=2025-01-09.csv"
+    },
+    {
+      "partition": "2025-01-10",
+      "rows": 14220,
+      "expected_rows": 14220,
+      "bytes": 2180739,
+      "sha256": "55b7b49a627bf7883d45378939d6f58a8e172f605a044c91286d1ebc16016c94",
+      "path": "raw/created_date=2025-01-10.csv"
+    },
+    {
+      "partition": "2025-01-11",
+      "rows": 11420,
+      "expected_rows": 11420,
+      "bytes": 1755457,
+      "sha256": "59e4395a257b3f6485331a68e819d407828d4177cc522f6fa729bde847e51513",
+      "path": "raw/created_date=2025-01-11.csv"
+    },
+    {
+      "partition": "2025-01-12",
+      "rows": 11756,
+      "expected_rows": 11756,
+      "bytes": 1807733,
+      "sha256": "f384277eca9c39f3702f70adeb007f3aded9cf2bbbf4be2146c4c8390f470905",
+      "path": "raw/created_date=2025-01-12.csv"
+    },
+    {
+      "partition": "2025-01-13",
+      "rows": 13049,
+      "expected_rows": 13049,
+      "bytes": 2002657,
+      "sha256": "577189fe646f6968b6f704a6674d9599e4c82beb4a0f488a19edef3cfb03f589",
+      "path": "raw/created_date=2025-01-13.csv"
+    },
+    {
+      "partition": "2025-01-14",
+      "rows": 10079,
+      "expected_rows": 10079,
+      "bytes": 1539653,
+      "sha256": "2d22f55a70b2dd5bb3548a190af208280dec52b159bdd4c7bed749c802ee5212",
+      "path": "raw/created_date=2025-01-14.csv"
+    }
+  ],
+  "fixture": {
+    "path": "tests/fixtures/sample_partition.csv",
+    "rows": 500,
+    "sha256": "a5492de96af71238fdaebf50b49347ff2507cecf7e49286ae0ff9514e659e7b3",
+    "from_partition": "2025-01-09",
+    "note": "first 500 data rows of that partition, committed so tests run on a clone"
+  }
+}
