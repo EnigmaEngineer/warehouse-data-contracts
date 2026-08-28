@@ -110,9 +110,14 @@ def main(argv=None):
         else:
             print("  {:34s} {:14s} judged {:>7}  failing {:>5}  {:.5f}".format(
                 name, entry["kind"], entry["considered"], entry["rows"], rate))
+    # Deliberately not called a row count. This is a sum over checks and a row that
+    # breaks two of them is in it twice, which is exactly what happens here. The number
+    # of rows is what scripts/quarantine_partition.py reports, because only a pass that
+    # carries row identity can answer it.
     check_rows = sum(e["rows"] for e in check_totals.values())
-    print("  cross column failures: {} rows, {:.5f} of the corpus".format(
-        check_rows, check_rows / total_rows))
+    print("  cross column failures: {} across the checks, not a row count".format(
+        check_rows))
+    print("  run scripts/quarantine_partition.py for the rows")
 
     print()
     asserted = sum(e["rows"] for (c, r, p), e in totals.items() if p == "asserted")

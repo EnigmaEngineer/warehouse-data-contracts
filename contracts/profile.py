@@ -44,22 +44,17 @@ def columns_in(rows):
 
 
 class ColumnResult:
+    """What one column did against its rules. Counts per rule, never a row count.
+
+    There used to be a `worst` property here returning the largest single rule count and
+    calling it a lower bound on affected rows. `contracts/validate.py` now answers that
+    question exactly, so the approximation had no caller and went.
+    """
+
     def __init__(self, column, rows, violations):
         self.column = column
         self.rows = rows
         self.violations = violations
-
-    @property
-    def worst(self):
-        """Rows failing the single worst rule on this column.
-
-        Deliberately not a sum. One row with a zip of 'N/A' can fail `matches` and nothing
-        else, but a row can fail two rules at once, so adding the counts overstates how
-        many rows are bad. The honest cheap answer is the largest single count, which is a
-        lower bound on the affected rows. The exact figure needs row level evaluation and
-        that belongs with the validator.
-        """
-        return max((v.count for v in self.violations), default=0)
 
 
 class CheckResult:

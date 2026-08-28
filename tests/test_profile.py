@@ -17,7 +17,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 from contracts import profile as profile_mod
-from contracts import rules, spec
+from contracts import rules, spec, validate
 
 CONTRACT = """
 dataset: t
@@ -141,17 +141,11 @@ def check_a_column_in_the_data_with_no_contract_is_reported():
     assert p.uncontracted == ["extra"], p.uncontracted
 
 
-def check_worst_is_zero_on_a_column_with_no_violations():
-    # max() over an empty sequence needs a default and the default has to be 0. A default
-    # of 1 makes every clean column report one bad row, which reads as a feed that is
-    # slightly broken everywhere.
-    p = _profile(CLEAN)
-    assert all(r.worst == 0 for r in p.results), [(r.column.name, r.worst) for r in p.results]
-
-
-def check_worst_is_the_largest_single_rule_and_not_a_sum():
-    # Two rules failing on one column can be the same row twice. Summing them overstates
-    # how many rows are bad, and the honest cheap answer is a lower bound.
+def check_two_rules_on_one_column_are_two_findings_and_not_two_rows():
+    # The column view counts values per rule and has no way to notice that both counts
+    # are about the same two rows. Neither 2 nor 4 is the number of bad rows and the
+    # profile cannot tell you which. contracts/validate.py is where that question is
+    # answered, and the check below pins the disagreement rather than leaving it to prose.
     contract = spec.parse(CONTRACT.replace(
         "    allowed: [BRONX, QUEENS]",
         "    allowed: [BRONX, QUEENS]\n    max_length: 6"))
@@ -162,11 +156,17 @@ def check_worst_is_the_largest_single_rule_and_not_a_sum():
 """)
     try:
         p = profile_mod.profile(contract, path, rules)
+        rows = profile_mod.read_partition(path)
     finally:
         os.unlink(path)
+
     result = [r for r in p.results if r.column.name == "borough"][0]
     assert sorted(v.rule for v in result.violations) == ["allowed", "max_length"]
-    assert result.worst == 2, result.worst
+    assert sum(v.count for v in result.violations) == 4
+
+    v = validate.validate(contract, rows)
+    assert v.bad_rows == 2, v.failures
+    assert v.sum_of_rule_counts() == 4
 
 
 def check_the_shipped_contract_runs_against_the_fixture_partition():
