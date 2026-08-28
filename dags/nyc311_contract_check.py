@@ -1,13 +1,14 @@
-"""Pull one daily partition and measure the contract against it.
+"""Pull one daily partition, judge it against the contract, and split it.
 
 This is the smallest DAG that exercises real code in this repo. It exists so that the local
 Airflow setup is a thing that has run rather than a thing described in a README. The full
-sequence through contract check and dbt to a published mart is not here yet.
+sequence through dbt to a published mart is not here yet.
 
-TODO: the profile task reports and does not decide. Nothing quarantines a bad batch and
-nothing stops a downstream task, because the validator that makes that call does not exist
-yet. Wiring a failing task in before then would give the DAG an opinion the code cannot
-back up.
+TODO: nothing here fails the run. Rows that break the contract are held and the clean ones
+are written where a loader would read them, which is the part that can be decided from the
+data. When a partition is bad enough to reject outright is a policy nobody has argued yet,
+and a threshold invented here would be one chosen by looking at the fourteen partitions it
+would judge.
 """
 
 import os
@@ -48,25 +49,27 @@ def nyc311_contract_check():
         return entry
 
     @task
-    def profile(entry):
-        from contracts import profile as profile_mod
-        from contracts import rules, spec
+    def check(entry):
+        import csv
+
+        from contracts import quarantine, spec, validate
 
         contract = spec.load(os.path.join(REPO, "contracts", "nyc311.yml"))
+        partition = entry["partition"]
         path = os.path.join(REPO, "data", "raw",
-                            "created_date={}.csv".format(entry["partition"]))
-        result = profile_mod.profile(contract, path, rules)
+                            "created_date={}.csv".format(partition))
 
-        column_hits = sum(len(r.violations) for r in result.results)
-        check_hits = sum(c.count for c in result.checks)
-        return {
-            "partition": entry["partition"],
-            "rows": result.rows,
-            "column_rules_broken": column_hits,
-            "rows_failing_cross_column_checks": check_hits,
-        }
+        with open(path, newline="") as fh:
+            reader = csv.DictReader(fh)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
 
-    profile(pull())
+        result = validate.validate(contract, rows, header=fieldnames)
+        outdir = os.path.join(REPO, "data", "quarantine",
+                              "created_date={}".format(partition))
+        return quarantine.write(outdir, fieldnames, rows, result, partition, path)
+
+    check(pull())
 
 
 nyc311_contract_check()
