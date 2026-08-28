@@ -51,10 +51,14 @@ def check_a_value_that_is_not_a_number_is_a_type_failure_not_a_range_one():
     assert v[0].count == 1
 
 
-def check_unique_counts_duplicated_values_not_duplicate_rows():
+def check_unique_counts_the_rows_carrying_a_duplicated_value():
+    # This used to count distinct duplicated values and report 1 here, which is a
+    # different quantity in the same field every other rule fills with a row count. The
+    # profile then took a max across the two and called the answer a lower bound on
+    # affected rows. Three rows carry the key 'a' and all three get held.
     v = rules.evaluate(col(unique=True), ["a", "a", "a", "b"])
     assert len(v) == 1
-    assert v[0].count == 1, v[0].count
+    assert v[0].count == 3, v[0].count
 
 
 def check_unique_passes_when_every_value_differs():
@@ -63,11 +67,13 @@ def check_unique_passes_when_every_value_differs():
 
 def check_unique_keeps_only_three_examples_too():
     # Each rule builds its own example list and they are capped separately, so a cap
-    # asserted on one rule says nothing about the others.
+    # asserted on one rule says nothing about the others. The examples repeat because
+    # they are the first three failing values rather than the first three distinct ones,
+    # which is what every other rule does.
     values = ["a", "a", "b", "b", "c", "c", "d", "d", "e"]
     v = rules.evaluate(col(unique=True), values)
-    assert v[0].count == 4, v[0].count
-    assert v[0].examples == ["a", "b", "c"], v[0].examples
+    assert v[0].count == 8, v[0].count
+    assert v[0].examples == ["a", "a", "b"], v[0].examples
 
 
 def check_allowed_is_case_sensitive_and_trims():

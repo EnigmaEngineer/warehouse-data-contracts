@@ -8,6 +8,7 @@ check and the warehouse tests.
 bash scripts/bootstrap-local.sh
 python scripts/pull_source.py --start 2025-01-01 --days 14
 python scripts/profile_source.py
+python scripts/quarantine_partition.py --write
 ```
 
 The source is the NYC 311 service request feed, dataset `erm2-nwe9` on
@@ -40,18 +41,82 @@ cross column checks
   closed_request_has_a_closed_date   requires_when  judged  178392  failing   493  0.00276
   open_request_has_no_closed_date    forbids_when   judged     886  failing    79  0.08916
   closed_after_created               ordering       judged  178013  failing    12  0.00007
-  cross column failures: 584 rows, 0.00326 of the corpus
+  cross column failures: 584 across the checks, not a row count
+  run scripts/quarantine_partition.py for the rows
 ```
 
-584 rows. The thresholds were never the problem. The shape of the rule was. A constraint
-that sees one value at a time cannot see a request closed before it was created, and that
-is most of what is actually wrong with this feed.
+The thresholds were never the problem. The shape of the rule was. A constraint that sees
+one value at a time cannot see a request closed before it was created, and that is most of
+what is actually wrong with this feed.
 
 Both groups have a signature, which is what says they are real rather than a parsing
 artefact. All 493 requests closed with no closing date are DHS, and all 493 are
 `Homeless Person Assistance`. All 12 requests closed before they were created are DOT, and
 several are negative by exactly three or six days with the clock time unchanged, which is a
 date component being written wrong somewhere upstream rather than noise.
+
+## 584 is not a number of rows, and neither is 493
+
+That last line used to read "584 rows". It is a sum over three checks and a row breaking
+two of them is in it twice, so it is an upper bound that reads like a count.
+
+The other tempting number is the largest single count, 493. It is a lower bound and it
+reads like a count too. Both are one line of arithmetic away from a per rule table and
+neither is the answer to the only question a quarantine has, which is which rows to move.
+
+`contracts/validate.py` judges row by row and carries the row identity, so it can just say:
+
+```
+python scripts/quarantine_partition.py
+
+partition        rows   accept     held     sum   worst      evals
+2025-01-01      10873    10841       32      32      26     303318
+2025-01-02      13811    13777       34      34      27     385293
+...
+2025-01-14      10079    10046       33      33      30     281048
+
+179314 rows over 14 partitions
+held        572 rows, 0.00319 of the corpus
+sum of the per rule counts 584, which is 12 more than the rows held
+12 held rows broke more than one rule
+```
+
+572. The upper bound was over by 12 and the lower bound was under by 79, which is 13.8
+percent of the answer.
+
+The 12 are not a rounding artefact and they are the same 12 rows every time. Every request
+closed before it was created is also a request still marked in flight while carrying a
+closing date. One broken date field, showing up under two rules:
+
+```
+('closed_after_created:check:ordering',
+ 'open_request_has_no_closed_date:check:forbids_when')  12
+```
+
+So the two views of one contract are kept as two summaries of one implementation.
+`rules.value_rules` returns the predicates and `rules.judge_check` judges one row against
+one cross column check, and both the column view and the row view read them.
+`tests/test_validate.py` grades the two against each other on a fixture built so they have
+something to disagree about, because two implementations of one rule can both be correct
+and still not match.
+
+## Quarantine
+
+```
+data/quarantine/created_date=2025-01-14/
+  accepted.csv        10046 rows, the original columns
+  quarantined.csv        33 rows, plus _contract_failures
+  report.json
+```
+
+The held rows keep every column they arrived with and gain one naming each rule they
+broke, `closed_request_has_a_closed_date:check:requires_when` and so on. A rejection report
+that gives a count is a report nobody can act on.
+
+What is deliberately not here is a threshold that fails a whole partition once too much of
+it is bad. Splitting the rows is a fact about the data. What share is too much is a policy,
+and any number set today would be one picked by looking at the fourteen partitions it is
+about to judge.
 
 ## Provenance is a field on every rule
 
@@ -155,68 +220,87 @@ alone.
         |  count(1) guard                      |  refuses a malformed contract
         v                                      v
    data/raw/created_date=YYYY-MM-DD.csv --> contracts/rules.py
-   data/manifest.json                          |
-   rows + sha256 per partition                 |  per column and cross column
-                                               v
-                                        contracts/profile.py
-                                               |
-                                               v
-                                    quarantine  ->  raw  ->  dbt  ->  mart
-                                    (not built yet)
+   data/manifest.json                          |  value_rules, judge_check
+   rows + sha256 per partition                 |
+                                       +-------+-------+
+                                       |               |
+                                       v               v
+                            contracts/profile.py  contracts/validate.py
+                            counts per rule       counts per row
+                                                       |
+                                                       v
+                                              contracts/quarantine.py
+                                                       |
+                                            +----------+----------+
+                                            v                     v
+                                      accepted.csv         quarantined.csv
+                                            |              + report.json
+                                            v
+                                     dbt  ->  mart
+                                     (not built yet)
 ```
 
-The Airflow side runs. `dags/nyc311_contract_check.py` pulls a partition and profiles it,
-end to end:
+The Airflow side runs. `dags/nyc311_contract_check.py` pulls a partition, judges it and
+writes the split, end to end:
 
 ```
-airflow dags test nyc311_contract_check 2025-01-14
+bash scripts/dag_smoke.sh 2025-01-13
 
-pull    -> {'partition': '2025-01-14', 'rows': 10079, 'expected_rows': 10079, ...}
-profile -> {'rows': 10079, 'column_rules_broken': 0,
-            'rows_failing_cross_column_checks': 33}
-state=success
+ran 2025-01-13, tasks: pull check
+13049 rows, 13003 accepted, 46 held, 364107 rule evaluations
 ```
+
+That script exists because `airflow dags test` on a date outside the DAG's own start and
+end window creates a run, executes no task at all, and reports `state=success`. A smoke
+test that greps for success passes on a run that did nothing, and it keeps passing forever
+once the DAG's `end_date` falls behind the date it uses. So the script asserts each task
+name appears in the log and that the report says how many rules it evaluated.
 
 ## Running the checks
 
 ```
 python tests/run_all.py
-69 passed, 0 failed
+100 passed, 0 failed
 ```
 
 Plain functions named `check_*`, no framework. Nothing in `tests/` needs Airflow or dbt
-installed.
+installed. The DAG is the gap and `scripts/dag_smoke.sh` is that gap.
 
-A mutation pass over the four library modules kills 115 of 120, with the control clean
+A mutation pass over the six library modules kills 157 of 163, with the control clean
 before and after:
 
 ```
 python ../portfolio-program/scripts/mutate.py --repo . \
   --module contracts/rules.py --module contracts/spec.py \
-  --module contracts/profile.py --module ingest/fetch.py
+  --module contracts/profile.py --module contracts/validate.py \
+  --module contracts/quarantine.py --module ingest/fetch.py
 
-115 killed, 5 survived
+157 killed, 6 survived
 ```
 
-The first pass killed 100 of 124 and the survivors are the reason the check count moved.
-Three were code nobody called, an accessor on `Contract` and two methods on `Profile`, and
-they were deleted rather than tested. Two were fixtures split evenly between good and bad
-rows, which pass just as happily against an inverted rule, because the count of failures
-does not move. One was the paging loop in the fetcher, where turning `len(page) < PAGE` into
-`<=` stops after the first full page. No partition here is near 50,000 rows so that branch
-never runs against the real source and nothing would have noticed.
+The validator and the quarantine went 34 of 42 on the first pass. What the eight survivors
+found is worth more than the number. Nothing was asking what the largest rule count is when
+there are no rule counts, so the default the max falls back to was free to be anything.
+Nothing pushed a row that breaks exactly one rule through the "more than one rule" counter,
+so a comparison of one or more read the same as a comparison of more than one. And the
+cross column branch of the evaluation counter was unpinned, which matters because that
+counter is what a clean report leans on to prove it looked at something. Seven checks later
+the pass is 41 of 42.
 
-The five survivors are all constants in `ingest/fetch.py`. The page size and the HTTP
-timeout. The read block size in the checksum loop and the manifest's JSON indent. Two are
-equivalent mutants, since reading a file in 1 MB or 2 MB blocks produces the same sha256.
-The other three are values no offline check can distinguish.
+The six survivors across the whole repo are all constants. The page size and the HTTP
+timeout in the fetcher, the read block size in the checksum loop, and two JSON indents. Two
+are equivalent mutants, since reading a file in 1 MB or 2 MB blocks produces the same
+sha256. The rest are values no offline check can distinguish, and pinning them would be a
+test asserting that a number is the number.
 
 ## What is not built
 
-- **No quarantine.** The profiler reports and does not decide. Nothing routes a bad batch
-  aside and nothing stops a downstream task, because the row level validator that makes
-  that call does not exist. The DAG carries a TODO saying so rather than a task that
-  pretends.
+- **No partition level verdict.** Rows are split and nothing fails the run. When a
+  partition is bad enough to reject outright is a policy nobody has argued yet, and a
+  threshold invented here would be one chosen by looking at the fourteen partitions it
+  would judge. The DAG carries a TODO saying so rather than a task that pretends.
+- **Nothing reads the quarantine back.** The held rows are written and no later step
+  re-judges them, retries them, or expires them. A quarantine you never empty is a folder.
 - **No dbt project.** dbt installs and runs here and nothing has been modelled yet.
 - **No Snowflake.** The warehouse is duckdb through dbt-duckdb. The Snowflake statements
   will be written alongside and they will not have run.
