@@ -8,6 +8,10 @@ __pycache__/
 # something you can find out rather than something you have to trust.
 data/raw/
 
+# The split of a judged partition. Rebuildable from the raw partition and the contract in
+# a couple of seconds, and the accepted file is a near copy of the input.
+data/quarantine/
+
 # Local Airflow and dbt installs plus the Airflow home. scripts/teardown.sh removes them.
 /tmp/
 airflow.db
