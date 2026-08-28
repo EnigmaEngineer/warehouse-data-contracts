@@ -86,6 +86,61 @@ def _collect(values, predicate, limit=3):
     return count, examples
 
 
+def value_rules(column):
+    """Every rule on this column that can be answered from one value, as (name, predicate).
+
+    Two things read this list. The profile aggregates it down a column and the validator
+    aggregates it across a row, so a column view and a row view of the same contract are
+    two summaries of one implementation rather than two implementations. Writing the range
+    check twice is how you end up with two numbers and nothing comparing them.
+
+    `required` is not here because it is the only rule that judges a null, and `unique` is
+    not here because no single value answers it. Both are handled by the caller.
+
+    Every predicate assumes a value that is present. A value that is absent is the
+    nullability rule's business.
+    """
+    out = [("type:" + column.type, lambda v: type_ok(column.type, v))]
+
+    if "allowed" in column.rules:
+        allowed = set(column.rules["allowed"])
+        out.append(("allowed", lambda v: v.strip() in allowed))
+
+    if "max_length" in column.rules:
+        limit = column.rules["max_length"]
+        out.append(("max_length", lambda v: len(v.strip()) <= limit))
+
+    if "matches" in column.rules:
+        pattern = re.compile(column.rules["matches"])
+        out.append(("matches", lambda v: pattern.match(v.strip()) is not None))
+
+    if "min" in column.rules:
+        floor = column.rules["min"]
+        # A value that is not a number has already failed the type rule. Failing it here
+        # too reports one bad value as two, which is the same mistake as folding
+        # nullability into a range.
+        out.append(("min", lambda v: as_number(v) is None or as_number(v) >= floor))
+
+    if "max" in column.rules:
+        ceiling = column.rules["max"]
+        out.append(("max", lambda v: as_number(v) is None or as_number(v) <= ceiling))
+
+    return out
+
+
+def duplicated(values):
+    """The set of values that appear more than once among the ones present."""
+    seen = set()
+    dupes = set()
+    for v in values:
+        if is_null(v):
+            continue
+        if v in seen:
+            dupes.add(v)
+        seen.add(v)
+    return dupes
+
+
 def evaluate(column, values):
     """Return a Violation per broken rule. An empty list means the column is clean.
 
@@ -93,6 +148,10 @@ def evaluate(column, values):
     judges nulls. Every other rule skips them, because "latitude is between 40.4 and
     40.95 or absent" is what a nullable range means, and folding the two together reports
     one failure as two.
+
+    Every count here is a count of values, including the one for `unique`. It used to be
+    the number of distinct keys that collided, which is a different quantity wearing the
+    same field name, and the profile then took a max across the two.
     """
     values = list(values)
     out = []
@@ -104,53 +163,16 @@ def evaluate(column, values):
         if count:
             out.append(Violation(column.name, "required", count, examples))
 
-    count, examples = _collect(present, lambda v: type_ok(column.type, v))
-    if count:
-        out.append(Violation(column.name, "type:" + column.type, count, examples))
+    for name, predicate in value_rules(column):
+        count, examples = _collect(present, predicate)
+        if count:
+            out.append(Violation(column.name, name, count, examples))
 
     if column.rules.get("unique"):
-        seen = set()
-        dupes = set()
-        for v in present:
-            if v in seen:
-                dupes.add(v)
-            seen.add(v)
-        if dupes:
-            out.append(
-                Violation(column.name, "unique", len(dupes), sorted(dupes)[:3])
-            )
-
-    if "allowed" in column.rules:
-        allowed = set(column.rules["allowed"])
-        count, examples = _collect(present, lambda v: v.strip() in allowed)
+        dupes = duplicated(present)
+        count, examples = _collect(present, lambda v: v not in dupes)
         if count:
-            out.append(Violation(column.name, "allowed", count, examples))
-
-    if "max_length" in column.rules:
-        limit = column.rules["max_length"]
-        count, examples = _collect(present, lambda v: len(v.strip()) <= limit)
-        if count:
-            out.append(Violation(column.name, "max_length", count, examples))
-
-    if "matches" in column.rules:
-        pattern = re.compile(column.rules["matches"])
-        count, examples = _collect(present, lambda v: pattern.match(v.strip()))
-        if count:
-            out.append(Violation(column.name, "matches", count, examples))
-
-    if "min" in column.rules:
-        floor = column.rules["min"]
-        numeric = [v for v in present if as_number(v) is not None]
-        count, examples = _collect(numeric, lambda v: as_number(v) >= floor)
-        if count:
-            out.append(Violation(column.name, "min", count, examples))
-
-    if "max" in column.rules:
-        ceiling = column.rules["max"]
-        numeric = [v for v in present if as_number(v) is not None]
-        count, examples = _collect(numeric, lambda v: as_number(v) <= ceiling)
-        if count:
-            out.append(Violation(column.name, "max", count, examples))
+            out.append(Violation(column.name, "unique", count, examples))
 
     return out
 
@@ -163,39 +185,48 @@ def _fires(check, row):
     return value in check.args["when_in"]
 
 
-def evaluate_check(check, rows):
-    """Cross column check over whole rows. Returns a Violation or None.
+def judge_check(check, row):
+    """Judge one row against one cross column check. True, False, or None for silent.
 
-    Every kind here skips a row it cannot judge rather than counting it as a failure. An
-    ordering check on a row with no closed date is not a violated ordering, it is an open
-    request, and folding the two together turns the nullability rule into a second
-    ordering failure.
+    None is the important one. Every kind skips a row it cannot judge rather than counting
+    it as a failure. An ordering check on a row with no closed date is not a violated
+    ordering, it is an open request, and folding the two together turns the nullability
+    rule into a second ordering failure.
+
+    The column view and the row view both call this, for the reason in `value_rules`.
     """
+    if check.kind == "ordering":
+        before = as_timestamp(row.get(check.args["before"]))
+        after = as_timestamp(row.get(check.args["after"]))
+        if before is None or after is None:
+            return None
+        return after >= before
+
+    if check.kind == "requires_when":
+        if not _fires(check, row):
+            return None
+        return not is_null(row.get(check.args["then_required"]))
+
+    if check.kind == "forbids_when":
+        if not _fires(check, row):
+            return None
+        return is_null(row.get(check.args["then_absent"]))
+
+    raise ValueError("unknown check kind {}".format(check.kind))
+
+
+def evaluate_check(check, rows):
+    """Cross column check over whole rows. Returns a Violation or None, plus a count of
+    the rows the check was able to say anything about."""
     bad = 0
     examples = []
     considered = 0
 
     for row in rows:
-        if check.kind == "ordering":
-            before = as_timestamp(row.get(check.args["before"]))
-            after = as_timestamp(row.get(check.args["after"]))
-            if before is None or after is None:
-                continue
-            considered += 1
-            ok = after >= before
-        elif check.kind == "requires_when":
-            if not _fires(check, row):
-                continue
-            considered += 1
-            ok = not is_null(row.get(check.args["then_required"]))
-        elif check.kind == "forbids_when":
-            if not _fires(check, row):
-                continue
-            considered += 1
-            ok = is_null(row.get(check.args["then_absent"]))
-        else:
-            raise ValueError("unknown check kind {}".format(check.kind))
-
+        ok = judge_check(check, row)
+        if ok is None:
+            continue
+        considered += 1
         if not ok:
             bad += 1
             if len(examples) < 3:
