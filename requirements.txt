@@ -2,6 +2,12 @@
 # the two files end up being read by the same people.
 PyYAML==6.0.3
 
+# duckdb is the raw layer and it is pinned rather than ranged. The load passes an explicit
+# columns= to read_csv and the checks assert what that produces, so the CSV reader's
+# behaviour is part of what is being tested. A minor bump that changed a default would
+# move a number this repo publishes.
+duckdb==1.5.5
+
 # Airflow is deliberately NOT here. dags/ imports it and the checks in tests/ do not, so
 # a clone can run every check with just the line above. Airflow and dbt are installed by
 # scripts/bootstrap-local.sh into two separate directories, because resolving dbt into

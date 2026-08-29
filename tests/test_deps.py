@@ -19,7 +19,7 @@ DIST_TO_MODULE = {
     "apache-airflow": "airflow",
 }
 
-LOCAL_PACKAGES = {"contracts", "ingest", "tests", "scripts", "dags"}
+LOCAL_PACKAGES = {"contracts", "ingest", "tests", "scripts", "dags", "warehouse"}
 
 
 def python_files():
