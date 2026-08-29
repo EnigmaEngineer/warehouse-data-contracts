@@ -9,6 +9,7 @@ bash scripts/bootstrap-local.sh
 python scripts/pull_source.py --start 2025-01-01 --days 14
 python scripts/profile_source.py
 python scripts/quarantine_partition.py --write
+python scripts/load_raw.py --twice
 ```
 
 The source is the NYC 311 service request feed, dataset `erm2-nwe9` on
@@ -117,6 +118,119 @@ What is deliberately not here is a threshold that fails a whole partition once t
 it is bad. Splitting the rows is a fact about the data. What share is too much is a policy,
 and any number set today would be one picked by looking at the fourteen partitions it is
 about to judge.
+
+## The raw layer is all text, and three rows are the reason
+
+Everything the load writes is `VARCHAR`. That is a decision, and this is the measurement
+behind it.
+
+Let duckdb read a partition without telling it anything and it types the columns for you.
+Run that over all fourteen and one column comes back two different ways:
+
+```
+python scripts/sniff_probe.py
+
+14 files, 11 columns, 1 where the guess is not stable
+  incident_zip   BIGINT    11 files
+    2025-01-01, 2025-01-02, 2025-01-03, 2025-01-04, 2025-01-05, 2025-01-06,
+    2025-01-07, 2025-01-09, 2025-01-10, 2025-01-11, 2025-01-13
+  incident_zip   VARCHAR   3 files
+    2025-01-08, 2025-01-12, 2025-01-14
+```
+
+Three partitions out of fourteen. The cause is one row each. `07307` and `00083` and
+`07105` are the only zips in 179,314 rows that start with a zero. A leading zero
+disqualifies an integer, so three rows decide the type of a column in the warehouse.
+
+**The dangerous path is the one that looks safe.** Reading all fourteen at once refuses:
+
+```
+reading all 14 at once:
+  refused, Invalid Input Error: Schema mismatch between globbed files.
+```
+
+Reading them one at a time and appending, which is exactly what a daily DAG does, does
+not refuse. The first partition to arrive decides the schema and every later one is cast
+into it without complaint:
+
+```
+first partition decides the schema, the rest are appended into it:
+  typed from created_date=2025-01-01.csv
+  179314 rows, 1972454 cells
+  closed_date        178013 cells differ from the text they arrived as
+  created_date       179314 cells differ from the text they arrived as
+  incident_zip            3 cells differ from the text they arrived as
+  longitude               2 cells differ from the text they arrived as
+```
+
+The timestamp columns are the loud number and the least interesting one.
+`2025-01-01T00:51:02.000` becomes `2025-01-01 00:51:02`, which is a different string
+carrying the same instant. `-74` becoming `-74.0` is the same kind of thing twice.
+
+The three zips are not that. `cast('00083' as bigint)` is `83`. The contract says
+`incident_zip` matches `^[0-9]{5}$`, the ingestion check reads the text off the file and
+passes it, and the same rule run against the table would refuse it. One clause, two
+answers, and neither layer is wrong on its own.
+
+Load the partitions in the other order and the damage is zero, because the first file then
+types the column as text. A defect whose existence depends on which day the backfill
+started is not one anybody finds by reading the code.
+
+So `warehouse/schema.py` builds the `columns=` argument from the contract and hands it to
+`read_csv` every time. Nothing in the load path infers anything. Casting is a decision that
+belongs downstream in dbt, where somebody can argue with it.
+
+## Loading a partition twice costs nothing
+
+```
+python scripts/load_raw.py --twice
+
+2025-01-01      10841 loaded        0 replaced     32 held
+...
+2025-01-14      10046 loaded        0 replaced     33 held
+
+178742 rows over 14 partitions, 0 replaced
+fingerprint 178742:9b087c3a9d00
+
+second pass 178742 rows, 178742 replaced
+fingerprint 178742:9b087c3a9d00
+identical
+ledger agrees with the table on all 14 partitions
+```
+
+Delete then insert on the partition key, inside one transaction. Not an append, because a
+warehouse where a rerun doubles a day is a warehouse nobody dares backfill. The delete runs
+whether or not the partition is there, so the first load and the tenth are the same
+statement.
+
+The fingerprint covers every source column plus the partition and the source checksum. It
+leaves out `_loaded_at`, which is wall clock and would make any two loads look different
+for a reason nobody cares about.
+
+`raw.load_ledger` carries one row per load. It is not the truth about what is in the table,
+it is what a load claimed, and `warehouse/load.reconcile` is the thing that compares the
+two. A check that has never fired is still worth having when the alternative is trusting
+the writer to be honest about itself.
+
+`load_partition` takes a quarantine directory rather than a CSV path, and that is the one
+design decision in the module worth arguing about. A function taking a file would happily
+be handed `data/raw`, all 13,049 rows of it including the 46 the contract refused, and the
+only thing between that and the warehouse would be every caller remembering not to. A
+directory with no `report.json` is refused, and `data/raw` has none:
+
+```
+load.load_partition(con, contract, "2025-01-13", "data/raw", sha)
+UnjudgedPartition: data/raw holds no report.json, so nothing has judged what is in it
+```
+
+The counts come out of that report rather than from the caller, so there is no argument to
+get wrong and no default to leave at zero.
+
+Four refusals in total. `UnjudgedPartition` for a directory nobody judged.
+`WrongPartition` when the report is about a different day. `HeaderMismatch` when the
+columns are not the contract's. And `LoadCountMismatch` when the table ends up holding a
+different number of rows than the report said it accepted. That last one is two artefacts
+written by different code having to agree.
 
 ## Provenance is a field on every rule
 
@@ -235,20 +349,36 @@ alone.
                                             v                     v
                                       accepted.csv         quarantined.csv
                                             |              + report.json
+                                            |                     |
+                                            v                     v
+                                    warehouse/load.py      nothing reads
+                                    columns= from the      these back yet
+                                    contract, never
+                                    inferred
+                                            |
+                                            v
+                                  raw.nyc311_service_requests
+                                  raw.load_ledger
+                                            |
                                             v
                                      dbt  ->  mart
                                      (not built yet)
 ```
 
-The Airflow side runs. `dags/nyc311_contract_check.py` pulls a partition, judges it and
-writes the split, end to end:
+The Airflow side runs end to end. `dags/nyc311_contract_check.py` pulls a partition and
+judges it, then writes the split and loads what passed:
 
 ```
 bash scripts/dag_smoke.sh 2025-01-13
 
-ran 2025-01-13, tasks: pull check
+ran 2025-01-13, tasks: pull check load_raw
 13049 rows, 13003 accepted, 46 held, 364107 rule evaluations
+raw layer holds 13003 rows for 2025-01-13
 ```
+
+The last line is asked of the database from outside the run. The load task already refuses
+a count it disagrees with, and a task returning without raising is not the same fact as the
+rows being there.
 
 That script exists because `airflow dags test` on a date outside the DAG's own start and
 end window creates a run, executes no task at all, and reports `state=success`. A smoke
@@ -260,32 +390,40 @@ name appears in the log and that the report says how many rules it evaluated.
 
 ```
 python tests/run_all.py
-100 passed, 0 failed
+137 passed, 0 failed
 ```
 
 Plain functions named `check_*`, no framework. Nothing in `tests/` needs Airflow or dbt
 installed. The DAG is the gap and `scripts/dag_smoke.sh` is that gap.
 
-A mutation pass over the six library modules kills 157 of 163, with the control clean
-before and after:
+A mutation pass over the eight library modules kills 193 of 199, with the control clean
+before and after each call:
 
 ```
 python ../portfolio-program/scripts/mutate.py --repo . \
   --module contracts/rules.py --module contracts/spec.py \
   --module contracts/profile.py --module contracts/validate.py \
-  --module contracts/quarantine.py --module ingest/fetch.py
+  --module contracts/quarantine.py --module ingest/fetch.py \
+  --module warehouse/schema.py --module warehouse/load.py
 
-157 killed, 6 survived
+193 killed, 6 survived
 ```
 
-The validator and the quarantine went 34 of 42 on the first pass. What the eight survivors
-found is worth more than the number. Nothing was asking what the largest rule count is when
-there are no rule counts, so the default the max falls back to was free to be anything.
-Nothing pushed a row that breaks exactly one rule through the "more than one rule" counter,
-so a comparison of one or more read the same as a comparison of more than one. And the
-cross column branch of the evaluation counter was unpinned, which matters because that
-counter is what a clean report leans on to prove it looked at something. Seven checks later
-the pass is 41 of 42.
+Seven of the eight were run against the tree above. `contracts/rules.py` carries a figure
+of 61 of 61 from the last time it was run, and its file has not changed since. Adding
+checks to a suite can kill more mutants and never fewer, so a carried number of that shape
+is a floor rather than a claim. Saying which is which is the point.
+
+The two new modules went 30 of 36 on the first pass and the six survivors were the useful
+part. Four of them lived in the two fields the type probe prints as its headline. Nothing
+read the name of the file that decided the schema, so pointing it at a different file
+changed no answer. Nothing read the cell count either, so multiplying rows by columns could
+have been dividing them. That figure is published two sections up.
+
+The other two were defaults. `rows_held` falls back to zero and every check named it
+explicitly, which is a test helper hiding a value from the thing it is meant to test. And
+the fingerprint's twelve hex characters were unpinned, which matters because a fingerprint
+is only ever useful against an older one. Six checks later the pass is 36 of 36.
 
 The six survivors across the whole repo are all constants. The page size and the HTTP
 timeout in the fetcher, the read block size in the checksum loop, and two JSON indents. Two
@@ -301,9 +439,23 @@ test asserting that a number is the number.
   would judge. The DAG carries a TODO saying so rather than a task that pretends.
 - **Nothing reads the quarantine back.** The held rows are written and no later step
   re-judges them, retries them, or expires them. A quarantine you never empty is a folder.
-- **No dbt project.** dbt installs and runs here and nothing has been modelled yet.
-- **No Snowflake.** The warehouse is duckdb through dbt-duckdb. The Snowflake statements
-  will be written alongside and they will not have run.
+- **No dbt project.** dbt installs and runs here and nothing has been modelled yet, so the
+  raw layer is currently a table nothing reads.
+- **No Snowflake.** The warehouse is duckdb through dbt-duckdb. `warehouse/schema.py`
+  writes the Snowflake DDL alongside the duckdb one and it has never been executed. The
+  only thing it does differently is `TIMESTAMP_NTZ`, which is a small enough difference
+  that trusting it would be the point at which it turns out to be wrong.
+- **One writer.** duckdb takes a single write lock on the file, so two DAG runs loading two
+  partitions at once will not both get in. Catchup is off and nothing here runs in
+  parallel, so this has never been hit. It is the first thing a real backfill would find.
+- **The load reads a file the previous task wrote.** That is a real handoff and it is also
+  a shared filesystem assumption. Two tasks on two workers do not have one, and the answer
+  is object storage rather than a bigger XCom.
+- **An empty CSV field becomes NULL in the table.** Measured on one partition. Each of the
+  five nullable columns holds exactly as many nulls as the source held empty strings.
+  `latitude` and `longitude` are 117 each. CSV cannot tell an empty string from a missing
+  value, so something has to choose. The contract's own null test already treats the two
+  the same. Worth knowing it is a choice rather than a passthrough.
 - **The cross column checks are three of a possible many.** They were added because they
   found something, not because the list is complete. A referential check between
   `complaint_type` and `descriptor` is the obvious next one and it needs a vocabulary that
