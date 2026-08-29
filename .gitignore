@@ -12,6 +12,10 @@ data/raw/
 # a couple of seconds, and the accepted file is a near copy of the input.
 data/quarantine/
 
+# The raw layer. Rebuilt in a few seconds from the accepted files by scripts/load_raw.py,
+# and a duckdb file is a binary nobody can read a diff of.
+data/warehouse.duckdb
+
 # Local Airflow and dbt installs plus the Airflow home. scripts/teardown.sh removes them.
 /tmp/
 airflow.db
