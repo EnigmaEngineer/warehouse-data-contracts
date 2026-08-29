@@ -18,7 +18,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PREFIX="${PREFIX:-/tmp/wdc}"
 
 export AIRFLOW_HOME="${AIRFLOW_HOME:-$PREFIX/airflow-home}"
-export PYTHONPATH="$PREFIX/airflow-libs"
+export PYTHONPATH="$PREFIX/airflow-libs:$PREFIX/libs"
 export PATH="$PREFIX/airflow-libs/bin:$PATH"
 export AIRFLOW__CORE__DAGS_FOLDER="$REPO/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
@@ -34,7 +34,7 @@ trap 'rm -f "$LOG"' EXIT
 airflow dags reserialize >/dev/null 2>&1
 airflow dags test nyc311_contract_check "$PARTITION" >"$LOG" 2>&1 || true
 
-EXPECTED="pull check"
+EXPECTED="pull check load_raw"
 MISSING=""
 for task in $EXPECTED; do
   if ! grep -q "end task task_id=$task" "$LOG"; then
@@ -78,4 +78,30 @@ if r["accepted"] + r["held"] != r["rows"]:
 
 print("{rows} rows, {accepted} accepted, {held} held, "
       "{rule_evaluations} rule evaluations".format(**r))
+PY
+
+# The DAG's own load task already refuses a count mismatch. Asking the database again from
+# outside the run is what proves the table is really there, rather than that a task
+# returned without raising.
+PYTHONPATH="$PREFIX/libs" python3 - "$REPO" "$PARTITION" "$REPORT" <<'PY'
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from contracts import spec
+from warehouse import load
+
+with open(sys.argv[3]) as fh:
+    report = json.load(fh)
+
+contract = spec.load(sys.argv[1] + "/contracts/nyc311.yml")
+con = load.connect(sys.argv[1] + "/data/warehouse.duckdb")
+rows = load.partition_rows(con, contract, sys.argv[2])
+con.close()
+
+if rows != report["accepted"]:
+    sys.exit("the raw table holds {} rows for {}, the report accepted {}".format(
+        rows, sys.argv[2], report["accepted"]))
+
+print("raw layer holds {} rows for {}".format(rows, sys.argv[2]))
 PY

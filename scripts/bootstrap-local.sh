@@ -20,6 +20,10 @@ PY_TAG="${PY_TAG:-3.10}"
 PREFIX="${PREFIX:-/tmp/wdc}"
 AIRFLOW_LIBS="$PREFIX/airflow-libs"
 DBT_LIBS="$PREFIX/dbt-libs"
+# A third target, and it is not a third opinion about a shared package. It is this repo's
+# own requirements.txt, which the DAG needs because the tasks import the library. Keeping
+# it out of the Airflow directory means a clone can run tests/ without any of this.
+LIBS="$PREFIX/libs"
 export AIRFLOW_HOME="${AIRFLOW_HOME:-$PREFIX/airflow-home}"
 
 # pip writes its wheel cache under HOME, not under TMPDIR. On a machine where HOME sits on
@@ -31,7 +35,7 @@ PIP_CACHE="$PREFIX/pip-cache"
 
 CONSTRAINTS="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PY_TAG}.txt"
 
-mkdir -p "$AIRFLOW_LIBS" "$DBT_LIBS" "$AIRFLOW_HOME" "$PIP_CACHE"
+mkdir -p "$AIRFLOW_LIBS" "$DBT_LIBS" "$LIBS" "$AIRFLOW_HOME" "$PIP_CACHE"
 
 echo "installing airflow ${AIRFLOW_VERSION} into ${AIRFLOW_LIBS}"
 pip3 install --quiet --cache-dir "$PIP_CACHE" --target "$AIRFLOW_LIBS" \
@@ -43,7 +47,13 @@ pip3 install --quiet --cache-dir "$PIP_CACHE" --target "$DBT_LIBS" \
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-export PYTHONPATH="$AIRFLOW_LIBS"
+echo "installing this repo's own requirements into ${LIBS}"
+pip3 install --quiet --cache-dir "$PIP_CACHE" --target "$LIBS" \
+  -r "$REPO/requirements.txt"
+
+# Airflow first on the path. Both directories carry PyYAML and Airflow's constraints file
+# is the one that has to win inside an Airflow process.
+export PYTHONPATH="$AIRFLOW_LIBS:$LIBS"
 export PATH="$AIRFLOW_LIBS/bin:$PATH"
 export AIRFLOW__CORE__DAGS_FOLDER="$REPO/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
@@ -60,7 +70,7 @@ echo "home     $AIRFLOW_HOME"
 echo
 echo "put this in your shell to use airflow:"
 echo "  export AIRFLOW_HOME=$AIRFLOW_HOME"
-echo "  export PYTHONPATH=$AIRFLOW_LIBS"
+echo "  export PYTHONPATH=$AIRFLOW_LIBS:$LIBS"
 echo "  export PATH=$AIRFLOW_LIBS/bin:\$PATH"
 echo "  export AIRFLOW__CORE__DAGS_FOLDER=$REPO/dags"
 echo "  export AIRFLOW__CORE__LOAD_EXAMPLES=False"
