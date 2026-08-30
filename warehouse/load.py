@@ -14,10 +14,22 @@ would double a partition on a rerun, and a warehouse where a backfill is dangero
 warehouse nobody backfills. The delete runs whether or not the partition is there, so the
 first load and the tenth are the same statement.
 
-The load refuses three ways. The header has to be the contract's columns. The report has to
-be about the partition being asked for. And the row count in the table afterwards has to
-match the count the report claimed was accepted. That last one is two artefacts written by
-different code saying the same number, which is worth more than either saying it alone.
+The load refuses four ways. The header has to be the contract's columns. The report has to
+be about the partition being asked for. The row count in the table afterwards has to match
+the count the report claimed was accepted. And the rows in the table have to be the rows
+that were in the file.
+
+That last check is the one that earned its place. The first three are all counts and a
+count cannot see a value being rewritten. `read_csv` reads a hive style directory name as
+a column and lets it win over the file's own column of the same name. So a partition
+living under `created_date=2025-01-01` came back with `created_date` equal to `2025-01-01`
+on every row, times of day gone. An explicit `columns=` did not stop it. Row counts
+matched and the ledger reconciled, and a reload produced a byte identical fingerprint
+because both loads were wrong the same way.
+
+So `verify_partition` reads the file with the standard library and the table with SQL and
+compares them. Two readers, one comparison. It costs a second pass over the file and it is
+the only check here that could have caught that.
 """
 
 import datetime
@@ -45,6 +57,10 @@ class WrongPartition(ValueError):
 
 class LoadCountMismatch(RuntimeError):
     """The table disagrees with the report about how many rows were accepted."""
+
+
+class ContentMismatch(RuntimeError):
+    """The table holds a different value from the one in the file."""
 
 
 def connect(path):
@@ -113,6 +129,67 @@ def read_verdict(directory, partition):
     return accepted, report
 
 
+def _file_rows(contract, path):
+    """The file's rows as tuples, read with the standard library rather than with read_csv.
+
+    That is the whole point. One side of the comparison has to come from something other
+    than the reader whose behaviour is in question, or both sides are wrong together.
+
+    An empty CSV field becomes None, matching what the load writes into the table, because
+    CSV cannot tell an empty string from a missing value and the table has had to choose.
+    """
+    import csv
+
+    columns = schema.source_columns(contract)
+    out = []
+    with open(path, newline="") as fh:
+        for row in csv.DictReader(fh):
+            out.append(tuple(
+                (row[c] if row[c] != "" else None) for c in columns))
+    return out
+
+
+def verify_partition(con, contract, partition, path, limit=5):
+    """Compare the loaded partition against the file it came from. Returns (count, examples).
+
+    No key. A contract is not required to carry a unique column, and keying on whichever
+    column happens to be first is an assumption that is silently wrong on a contract that
+    does not have one. The first version of this did exactly that, and on a fixture whose
+    rows all shared a first column it collapsed four rows into one and reported six
+    differences that were not there.
+
+    So this is a multiset comparison and `count` is the size of the symmetric difference.
+    One rewritten value counts twice, once for the row that is no longer in the table and
+    once for the row that appeared. A row dropped counts once. Order does not enter into
+    it, which matters because the table's order is whatever the reader produced.
+
+    `limit` caps the examples. It does not cap the count.
+    """
+    from collections import Counter
+
+    columns = schema.source_columns(contract)
+    from_file = Counter(_file_rows(contract, path))
+
+    selected = ", ".join(_quote(c) for c in columns)
+    from_table = Counter(con.execute(
+        "select {} from {} where {} = ?".format(
+            selected, schema.qualified(contract), _quote(schema.PARTITION_COLUMN)),
+        [partition],
+    ).fetchall())
+
+    only_table = from_table - from_file
+    only_file = from_file - from_table
+
+    examples = []
+    for row in sorted(only_table.elements(), key=repr)[:limit]:
+        examples.append({"where": "table", "row": row})
+    for row in sorted(only_file.elements(), key=repr)[:limit]:
+        examples.append({"where": "file", "row": row})
+
+    count = sum(only_table.values()) + sum(only_file.values())
+    return count, examples[:limit]
+
+
 def load_partition(con, contract, partition, directory, source_sha256, now=None):
     """Replace one partition in the raw table from a judged directory. Returns a summary.
 
@@ -152,8 +229,13 @@ def load_partition(con, contract, partition, directory, source_sha256, now=None)
             [partition],
         )
         con.execute(
+            # hive_partitioning=false is load bearing. The accepted file lives under
+            # created_date=2025-01-01, read_csv reads that directory name as a column, and
+            # a column read off the path beats the file's own column of the same name.
+            # It also beats columns=, so the explicit type is ignored for that column too.
             "insert into {} ({}) select {}, ?, ?, ? from read_csv(?, header=true, "
-            "columns={})".format(table, target, selected, _columns_argument(contract)),
+            "hive_partitioning=false, columns={})".format(
+                table, target, selected, _columns_argument(contract)),
             [partition, source_sha256, stamp, path],
         )
         loaded = partition_rows(con, contract, partition)
@@ -161,6 +243,12 @@ def load_partition(con, contract, partition, directory, source_sha256, now=None)
             "insert into {} values (?, ?, ?, ?, ?, ?)".format(ledger),
             [partition, contract.dataset, loaded, rows_held, source_sha256, stamp],
         )
+        differing, examples = verify_partition(con, contract, partition, path)
+        if differing:
+            raise ContentMismatch(
+                "{}: {} rows in the table are not the rows in the file, first {}".format(
+                    partition, differing, examples)
+            )
         con.execute("commit")
     except Exception:
         con.execute("rollback")
@@ -178,6 +266,7 @@ def load_partition(con, contract, partition, directory, source_sha256, now=None)
         "rows_loaded": loaded,
         "rows_replaced": before,
         "rows_held": rows_held,
+        "cells_checked": loaded * len(columns),
         "source_sha256": source_sha256,
     }
 

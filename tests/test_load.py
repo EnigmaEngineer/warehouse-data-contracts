@@ -179,6 +179,228 @@ def check_a_leading_zero_zip_survives_the_load():
     con.close()
 
 
+def check_a_hive_shaped_directory_does_not_overwrite_the_column_it_names():
+    """The check that was missing, and the reason it was missing is the directory name.
+
+    Every fixture in this file used to live in a directory called `a` or `b`. The real
+    quarantine lives in `created_date=2025-01-01`, and read_csv reads a directory of that
+    shape as a column and lets it beat the file's own column of the same name. So the
+    whole suite was green while the warehouse held the partition string in `day` on every
+    row, times of day gone.
+
+    An explicit columns= does not stop it. The path derived column overrides the declared
+    type as well as the value.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        # Full timestamps rather than bare dates. A fixture holding '2025-01-01' in `day`
+        # cannot show the loss, because the wrong answer and the right one are equal.
+        body = ("day,zip,n\n"
+                "2025-01-01T00:51:02.000,10001,1\n"
+                "2025-01-01T09:14:00.000,00083,2\n"
+                "2025-01-01T17:02:59.000,11201,3\n")
+        directory = judged(tmp, "day=2025-01-01", body, "2025-01-01")
+        load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        days = [r[0] for r in con.execute(
+            "select day from {} order by n".format(schema.qualified(c))).fetchall()]
+        assert days == ["2025-01-01T00:51:02.000",
+                        "2025-01-01T09:14:00.000",
+                        "2025-01-01T17:02:59.000"], days
+    con.close()
+
+
+def check_the_content_check_catches_a_value_the_table_does_not_share_with_the_file():
+    """verify_partition on its own, against a table that really disagrees.
+
+    The load cannot produce a mismatch any more, so the value is changed by hand. A check
+    that can only ever be reached through the fixed code path is a check nobody has run.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = judged(tmp, "a", BIG, "2025-01-01")
+        load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        path = os.path.join(directory, load.ACCEPTED_FILE)
+
+        count, problems = load.verify_partition(con, c, "2025-01-01", path)
+        assert count == 0, problems
+
+        con.execute(
+            "update {} set zip = '99999' where n = '2'".format(schema.qualified(c)))
+        count, problems = load.verify_partition(con, c, "2025-01-01", path)
+        # Two, not one. The row holding 00083 left the table and a row holding 99999
+        # arrived, and a symmetric difference counts both.
+        assert count == 2, (count, problems)
+        sides = sorted(p["where"] for p in problems)
+        assert sides == ["file", "table"], problems
+        rows = dict((p["where"], p["row"]) for p in problems)
+        assert rows["file"][1] == "00083", problems
+        assert rows["table"][1] == "99999", problems
+    con.close()
+
+
+def check_the_content_check_survives_a_contract_with_no_unique_column():
+    """The fixture that killed the first version of this check.
+
+    Every row in this partition carries the same value in the first contract column. A
+    comparison keyed on that column collapses four rows into one and then reports six
+    differences that do not exist. The real contract has a unique key, so nothing here
+    would have shown it.
+    """
+    c = contract()
+    con = opened(c)
+    assert not any(col.rules.get("unique") for col in c.columns), \
+        "this fixture is only meaningful on a contract with no unique column"
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = judged(tmp, "a", BIG, "2025-01-01")
+        load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        path = os.path.join(directory, load.ACCEPTED_FILE)
+        count, problems = load.verify_partition(con, c, "2025-01-01", path)
+        assert count == 0, (count, problems)
+    con.close()
+
+
+def check_the_examples_are_capped_and_the_count_is_not():
+    """Lopsided on purpose. Three rows rewritten, two examples asked for.
+
+    A limit applied to the count rather than to the examples would report 2, and the
+    refusal would understate itself on exactly the partitions where it matters most.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = judged(tmp, "a", BIG, "2025-01-01")
+        load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        path = os.path.join(directory, load.ACCEPTED_FILE)
+        table = schema.qualified(c)
+        con.execute("update {} set zip = '9999' || n where n <> '4'".format(table))
+
+        count, problems = load.verify_partition(con, c, "2025-01-01", path, limit=2)
+        # Three rows changed, so six entries in the symmetric difference.
+        assert count == 6, (count, problems)
+        assert len(problems) == 2, problems
+    con.close()
+
+
+def check_the_default_example_cap_is_the_one_the_load_actually_gets():
+    """load_partition calls verify_partition with no limit, so the default is production.
+
+    Every other check here names the argument, which leaves the default untested and
+    leaves it free to be anything. Four rows rewritten gives eight entries and the
+    refusal message has to stay readable.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = judged(tmp, "a", BIG, "2025-01-01")
+        load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        path = os.path.join(directory, load.ACCEPTED_FILE)
+        con.execute("update {} set zip = '7777' || n".format(schema.qualified(c)))
+        count, problems = load.verify_partition(con, c, "2025-01-01", path)
+        assert count == 8, (count, problems)
+        assert len(problems) == 5, problems
+    con.close()
+
+
+def check_a_row_in_the_table_that_is_not_in_the_file_at_all_is_counted():
+    """The boundary nobody writes. One side longer than the other.
+
+    A loop over the shorter of two lists reports nothing when a row appears from nowhere,
+    which is exactly the shape of a load that read the wrong file.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = judged(tmp, "a", BIG, "2025-01-01")
+        load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        path = os.path.join(directory, load.ACCEPTED_FILE)
+        con.execute(
+            "insert into {} values ('2025-01-01', '12345', '9', "
+            "'2025-01-01', 'abc123', ?)".format(schema.qualified(c)), [STAMP])
+        count, problems = load.verify_partition(con, c, "2025-01-01", path)
+        assert count == 1, (count, problems)
+        assert problems[0]["where"] == "table", problems
+    con.close()
+
+
+def check_a_row_missing_from_the_table_is_counted_too():
+    """The mirror, and the half a one sided comparison misses.
+
+    Only checking that the table's rows are in the file passes a load that dropped rows,
+    because everything it did put in is genuine.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = judged(tmp, "a", BIG, "2025-01-01")
+        load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        path = os.path.join(directory, load.ACCEPTED_FILE)
+        con.execute(
+            "delete from {} where n = '4'".format(schema.qualified(c)))
+        count, problems = load.verify_partition(con, c, "2025-01-01", path)
+        assert count == 1, (count, problems)
+        assert problems[0]["where"] == "file", problems
+    con.close()
+
+
+def check_a_duplicated_row_is_not_hidden_by_the_multiset():
+    """A set would swallow this. Two identical rows against one is a difference of one.
+
+    The boundary that matters for a comparison built on Counter rather than on set.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = judged(tmp, "a", BIG, "2025-01-01")
+        load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        path = os.path.join(directory, load.ACCEPTED_FILE)
+        con.execute(
+            "insert into {} values ('2025-01-01', '10001', '1', "
+            "'2025-01-01', 'abc123', ?)".format(schema.qualified(c)), [STAMP])
+        count, problems = load.verify_partition(con, c, "2025-01-01", path)
+        assert count == 1, (count, problems)
+        assert problems[0]["where"] == "table", problems
+    con.close()
+
+
+def check_an_empty_field_in_the_file_matches_a_null_in_the_table():
+    """CSV cannot tell an empty string from a missing value and the load writes null.
+
+    Without this the cell check would report every nullable empty field as a mismatch,
+    which is a check that fires on every partition and therefore fires on none.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        body = "day,zip,n\n2025-01-01,,1\n2025-01-01,10001,2\n"
+        directory = judged(tmp, "a", body, "2025-01-01")
+        load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        path = os.path.join(directory, load.ACCEPTED_FILE)
+        count, problems = load.verify_partition(con, c, "2025-01-01", path)
+        assert count == 0, problems
+        stored = con.execute(
+            "select zip from {} order by n".format(schema.qualified(c))).fetchall()
+        assert stored == [(None,), ("10001",)], stored
+    con.close()
+
+
+def check_the_load_reports_how_many_cells_it_compared():
+    """A check that reports nothing about what it checked can pass on nothing.
+
+    Four rows and three columns is twelve, and the number is in the result rather than
+    only in an assertion, because the driver prints it.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        result = load.load_partition(
+            con, c, "2025-01-01", judged(tmp, "a", BIG, "2025-01-01"),
+            "abc123", now=STAMP)
+        assert result["cells_checked"] == 12, result
+    con.close()
+
+
 def check_loading_the_same_partition_twice_replaces_it():
     c = contract()
     con = opened(c)
