@@ -1,11 +1,15 @@
-"""Pull one daily partition, judge it against the contract, then load what passed.
+"""Pull one daily partition and judge it. Then load what passed and model it.
 
 This is the smallest DAG that exercises real code in this repo. It exists so that the local
-Airflow setup is a thing that has run rather than a thing described in a README. The dbt
-half and the published mart are not here yet.
+Airflow setup is a thing that has run rather than a thing described in a README.
 
 The load reads the accepted file the previous task wrote rather than the fetched partition,
 so nothing reaches the warehouse without going through the judgement first.
+
+The transform task shells out to scripts/dbt.sh rather than importing dbt. It has to.
+Resolving dbt into Airflow's own install succeeds and moves 21 packages Airflow pinned, so
+the two live in separate directories and this process cannot see the other one. A subprocess
+is not a workaround here, it is the only correct shape.
 
 TODO: nothing here fails the run on the strength of the data. Rows that break the contract
 are held and the clean ones are loaded, which is the part that can be decided from the data.
@@ -15,6 +19,7 @@ judge.
 """
 
 import os
+import subprocess
 import sys
 
 import pendulum
@@ -23,6 +28,11 @@ from airflow.sdk import dag, task
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
+
+# The same variable the dbt profile reads, so the load and the models cannot end up
+# pointed at two different databases.
+def warehouse_path():
+    return os.environ.get("WDC_DUCKDB", os.path.join(REPO, "data", "warehouse.duckdb"))
 
 
 @dag(
@@ -79,7 +89,7 @@ def nyc311_contract_check():
         from warehouse import load
 
         contract = spec.load(os.path.join(REPO, "contracts", "nyc311.yml"))
-        con = load.connect(os.path.join(REPO, "data", "warehouse.duckdb"))
+        con = load.connect(warehouse_path())
         try:
             load.apply_schema(con, contract)
             # The directory rather than the accepted file. The loader reads the report
@@ -92,8 +102,29 @@ def nyc311_contract_check():
         finally:
             con.close()
 
+    @task
+    def transform(loaded):
+        """dbt build. Models, tests and the snapshot, in one pass and in that order.
+
+        build rather than run then test. run leaves a mart that has been written and not
+        checked, and on a failure the untested mart is already published.
+        """
+        env = dict(os.environ)
+        env["WDC_DUCKDB"] = warehouse_path()
+        result = subprocess.run(
+            ["bash", os.path.join(REPO, "scripts", "dbt.sh"), "build"],
+            env=env, capture_output=True, text=True)
+        # dbt's own summary line, kept because the task log is where anyone debugging a
+        # failed run looks first and the exit code alone does not say which model died.
+        tail = result.stdout.strip().splitlines()[-15:]
+        print("\n".join(tail))
+        if result.returncode != 0:
+            print(result.stderr[-2000:])
+            raise RuntimeError("dbt build failed for {}".format(loaded["partition"]))
+        return {"partition": loaded["partition"], "rows_loaded": loaded["rows_loaded"]}
+
     pulled = pull()
-    load_raw(check(pulled), pulled)
+    transform(load_raw(check(pulled), pulled))
 
 
 nyc311_contract_check()

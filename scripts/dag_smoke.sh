@@ -22,6 +22,9 @@ export PYTHONPATH="$PREFIX/airflow-libs:$PREFIX/libs"
 export PATH="$PREFIX/airflow-libs/bin:$PATH"
 export AIRFLOW__CORE__DAGS_FOLDER="$REPO/dags"
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
+# The load task and the dbt profile both read this, so the run cannot end up with the raw
+# layer in one database and the marts in another.
+export WDC_DUCKDB="${WDC_DUCKDB:-$REPO/data/warehouse.duckdb}"
 
 if ! command -v airflow >/dev/null 2>&1; then
   echo "airflow is not on PATH. run scripts/bootstrap-local.sh first" >&2
@@ -34,7 +37,7 @@ trap 'rm -f "$LOG"' EXIT
 airflow dags reserialize >/dev/null 2>&1
 airflow dags test nyc311_contract_check "$PARTITION" >"$LOG" 2>&1 || true
 
-EXPECTED="pull check load_raw"
+EXPECTED="pull check load_raw transform"
 MISSING=""
 for task in $EXPECTED; do
   if ! grep -q "end task task_id=$task" "$LOG"; then
@@ -82,26 +85,39 @@ PY
 
 # The DAG's own load task already refuses a count mismatch. Asking the database again from
 # outside the run is what proves the table is really there, rather than that a task
-# returned without raising.
-PYTHONPATH="$PREFIX/libs" python3 - "$REPO" "$PARTITION" "$REPORT" <<'PY'
+# returned without raising. The mart is asked the same way, because a dbt build that exits
+# 0 having compiled nothing is the zero input failure arriving through a fourth door.
+PYTHONPATH="$PREFIX/libs" python3 - "$REPO" "$PARTITION" "$REPORT" "$WDC_DUCKDB" <<'PY'
 import json
 import sys
 
 sys.path.insert(0, sys.argv[1])
 from contracts import spec
-from warehouse import load
+from warehouse import history, load
 
 with open(sys.argv[3]) as fh:
     report = json.load(fh)
 
 contract = spec.load(sys.argv[1] + "/contracts/nyc311.yml")
-con = load.connect(sys.argv[1] + "/data/warehouse.duckdb")
+con = load.connect(sys.argv[4])
 rows = load.partition_rows(con, contract, sys.argv[2])
-con.close()
 
 if rows != report["accepted"]:
     sys.exit("the raw table holds {} rows for {}, the report accepted {}".format(
         rows, sys.argv[2], report["accepted"]))
 
+marts = {}
+for name in ("gold.gold_agency_daily", "gold.gold_complaint_resolution",
+             "silver.slv_service_requests"):
+    marts[name] = con.execute("select count(*) from " + name).fetchone()[0]
+    if marts[name] == 0:
+        sys.exit("{} is empty after the run".format(name))
+
+versions = history.version_summary(con)
+con.close()
+
 print("raw layer holds {} rows for {}".format(rows, sys.argv[2]))
+print("marts: " + ", ".join("{} {}".format(k, v) for k, v in sorted(marts.items())))
+print("history: {versions} versions over {keys} keys, {superseded} superseded".format(
+    **versions))
 PY

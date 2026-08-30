@@ -49,7 +49,13 @@ def top_level_imports(path):
 # Two files, because Airflow is installed separately from everything else and putting it
 # in the main one would make that collision look supported. Both are read, so an
 # undeclared import is still an undeclared import.
+#
+# requirements-dbt.txt is deliberately NOT here. Nothing imports dbt, it is run as a
+# subprocess, so reading that file would make check_nothing_is_declared_that_nobody_imports
+# fail and it would be right to. The file still has to exist and the bring-up script still
+# has to read it, which is the check below.
 REQUIREMENTS = ("requirements.txt", "requirements-airflow.txt")
+SUBPROCESS_REQUIREMENTS = "requirements-dbt.txt"
 
 
 def declared():
@@ -72,6 +78,36 @@ def check_every_requirements_file_was_read():
     assert len(REQUIREMENTS) == 2
     for name in REQUIREMENTS:
         assert os.path.exists(os.path.join(ROOT, name)), name
+
+
+def check_the_dbt_version_lives_in_one_place_and_is_published_in_the_other():
+    """A version written in a shell variable and again in a file drifts.
+
+    Two halves. The bring-up script must read the requirements file rather than carry its
+    own copy of the number, and the README must carry the number, because a README naming
+    a version nobody installs describes an environment that has never run.
+    """
+    path = os.path.join(ROOT, SUBPROCESS_REQUIREMENTS)
+    assert os.path.exists(path), SUBPROCESS_REQUIREMENTS
+
+    with open(os.path.join(ROOT, "scripts", "bootstrap-local.sh")) as fh:
+        script = fh.read()
+    assert SUBPROCESS_REQUIREMENTS in script, \
+        "bootstrap-local.sh does not read {}".format(SUBPROCESS_REQUIREMENTS)
+
+    with open(os.path.join(ROOT, "README.md")) as fh:
+        readme = fh.read()
+
+    pinned = [line.strip() for line in open(path)
+              if line.strip() and not line.startswith("#")]
+    assert pinned, "{} declares nothing".format(SUBPROCESS_REQUIREMENTS)
+    for line in pinned:
+        assert "==" in line, "{} is not pinned: {}".format(SUBPROCESS_REQUIREMENTS, line)
+        dist, version = line.split("==")
+        assert version not in script, \
+            "{} is pinned in the requirements file and in the script".format(dist)
+        assert version in readme, \
+            "the README does not say which {} it runs on".format(dist)
 
 
 def third_party(names):
