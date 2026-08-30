@@ -1,0 +1,10 @@
+# The database path is an environment variable with the repo default behind it, because
+# duckdb cannot check point its write ahead log on every filesystem and a run that has to
+# put the file somewhere else should not have to edit a tracked file to do it.
+nyc311_warehouse:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('WDC_DUCKDB', '../data/warehouse.duckdb') }}"
+      threads: 2

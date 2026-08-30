@@ -13,8 +13,6 @@
 set -euo pipefail
 
 AIRFLOW_VERSION="${AIRFLOW_VERSION:-3.1.8}"
-DBT_VERSION="${DBT_VERSION:-1.12.3}"
-DBT_DUCKDB_VERSION="${DBT_DUCKDB_VERSION:-1.9.4}"
 PY_TAG="${PY_TAG:-3.10}"
 
 PREFIX="${PREFIX:-/tmp/wdc}"
@@ -41,11 +39,13 @@ echo "installing airflow ${AIRFLOW_VERSION} into ${AIRFLOW_LIBS}"
 pip3 install --quiet --cache-dir "$PIP_CACHE" --target "$AIRFLOW_LIBS" \
   "apache-airflow==${AIRFLOW_VERSION}" --constraint "$CONSTRAINTS"
 
-echo "installing dbt ${DBT_VERSION} into ${DBT_LIBS}"
-pip3 install --quiet --cache-dir "$PIP_CACHE" --target "$DBT_LIBS" \
-  "dbt-core==${DBT_VERSION}" "dbt-duckdb==${DBT_DUCKDB_VERSION}"
-
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Versions come out of the requirements file rather than out of a shell variable here.
+# Writing a version in two places is writing it wrong in one of them eventually.
+echo "installing dbt into ${DBT_LIBS}"
+pip3 install --quiet --cache-dir "$PIP_CACHE" --target "$DBT_LIBS" \
+  -r "$REPO/requirements-dbt.txt"
 
 echo "installing this repo's own requirements into ${LIBS}"
 pip3 install --quiet --cache-dir "$PIP_CACHE" --target "$LIBS" \

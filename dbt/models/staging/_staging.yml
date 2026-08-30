@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: stg_service_requests
+    description: >
+      Raw text with types put on it. One row per accepted service request, same grain as
+      the source. incident_zip is deliberately still a string.
+    columns:
+      - name: unique_key
+        data_tests:
+          - not_null
+          - unique
+      - name: created_at
+        description: The partition key's own timestamp, inside the day rather than the day.
+        data_tests:
+          - not_null
+      - name: incident_zip
+        description: >
+          Still a string. Three rows here start with a zero and an integer cannot hold one.
+      - name: partition_day
+        data_tests:
+          - not_null

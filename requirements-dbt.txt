@@ -1,0 +1,16 @@
+# dbt, installed into its own directory by scripts/bootstrap-local.sh.
+#
+# Not in requirements.txt and not in requirements-airflow.txt either. Nothing in this repo
+# imports dbt. The DAG and scripts/dbt.sh run it as a subprocess, which is the only shape
+# that works, because resolving dbt into Airflow's install succeeds and moves 21 packages
+# Airflow's constraints file had pinned.
+#
+# So the import coverage check in tests/test_deps.py deliberately does not read this file.
+# A package nobody imports would fail it, and correctly. What reads it is
+# bootstrap-local.sh, so the versions live here rather than being repeated in a shell
+# variable and in a README.
+#
+# Both pinned. dbt-duckdb decides which duckdb comes along, and requirements.txt pins
+# duckdb at 1.5.5 because the load asserts what that reader produces.
+dbt-core==1.12.3
+dbt-duckdb==1.9.4

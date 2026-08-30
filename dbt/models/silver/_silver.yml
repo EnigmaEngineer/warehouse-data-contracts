@@ -1,0 +1,32 @@
+version: 2
+
+models:
+  - name: slv_service_requests
+    description: One row per request, with the derived columns an analyst would write by hand.
+    columns:
+      - name: unique_key
+        data_tests:
+          - not_null
+          - unique
+      - name: status
+        data_tests:
+          - accepted_values:
+              arguments:
+                # The same list the contract carries. Two copies of one vocabulary is the
+                # problem the generated tests have to solve, and it is named in the README
+                # rather than pretended away here.
+                values: ["Open", "Closed", "Assigned", "Pending", "In Progress", "Started", "Draft", "Unspecified"]
+      - name: resolution_hours
+        description: Null for an open request. Null is not zero and the marts have to say which.
+
+  - name: dim_complaint_type
+    description: >
+      Type 1 on purpose. The attribute that looks slowly changing is concurrent instead.
+    columns:
+      - name: complaint_type
+        data_tests:
+          - not_null
+          - unique
+      - name: request_count
+        data_tests:
+          - not_null

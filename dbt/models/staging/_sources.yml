@@ -1,0 +1,32 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    description: >
+      Written by warehouse/load.py, one partition at a time, out of a quarantine
+      directory. Every column is VARCHAR on purpose. The reader is never allowed to
+      decide a type, because what it decides depends on which partition it read first.
+    tables:
+      - name: nyc311_service_requests
+        description: One row per accepted service request. Text in every column.
+        columns:
+          - name: unique_key
+            description: The publisher's identifier for a request.
+            data_tests:
+              - not_null
+              - unique
+          - name: _partition
+            description: The day this row was fetched under. The delete key on a reload.
+            data_tests:
+              - not_null
+
+      - name: load_ledger
+        description: >
+          One row per load. It records what a load claimed rather than what the table
+          holds, which is what makes the reconciliation between the two able to fail.
+        columns:
+          - name: _partition
+            data_tests:
+              - not_null
+              - unique

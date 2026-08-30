@@ -1,0 +1,29 @@
+version: 2
+
+models:
+  - name: gold_agency_daily
+    description: >
+      Requests per agency per day. The three status counts do not sum to the total on
+      purpose, because a request can be Assigned or Pending and that is neither open nor
+      closed. gold_totals_agree_with_silver.sql is what checks the arithmetic.
+    columns:
+      - name: created_date
+        data_tests:
+          - not_null
+      - name: agency
+        data_tests:
+          - not_null
+      - name: request_count
+        data_tests:
+          - not_null
+
+  - name: gold_complaint_resolution
+    description: Resolution time by complaint type, with the unresolved count beside it.
+    columns:
+      - name: complaint_type
+        data_tests:
+          - not_null
+          - unique
+      - name: request_count
+        data_tests:
+          - not_null

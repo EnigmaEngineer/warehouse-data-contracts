@@ -1,0 +1,31 @@
+name: nyc311_warehouse
+version: "1.0.0"
+config-version: 2
+
+profile: nyc311_warehouse
+
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  nyc311_warehouse:
+    staging:
+      # A view. Staging is a cast and a rename and nothing else, so materialising it costs
+      # disk for no saving. The layers below are tables because they aggregate.
+      +materialized: view
+      +schema: stg
+    silver:
+      +materialized: table
+      +schema: silver
+    gold:
+      +materialized: table
+      +schema: gold
+
+snapshots:
+  nyc311_warehouse:
+    +target_schema: history

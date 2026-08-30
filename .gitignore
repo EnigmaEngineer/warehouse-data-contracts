@@ -21,3 +21,11 @@ data/warehouse.duckdb
 airflow.db
 airflow.cfg
 logs/
+
+# dbt's own build output. Compiled SQL, the manifest and the run results, all regenerated
+# by scripts/dbt.sh. data/extract_diff.json is NOT here and is committed on purpose, since
+# the live source keeps moving and that file is the only record of what it did.
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/.user.yml
