@@ -1,0 +1,151 @@
+{
+  "partitions": [
+    {
+      "added": [],
+      "changed": {
+        "63591237": {
+          "closed_date": [
+            "2025-01-03T12:29:42.000",
+            "2026-08-28T14:27:34.000"
+          ]
+        },
+        "63592286": {
+          "closed_date": [
+            "2025-01-03T12:30:25.000",
+            "2026-08-28T14:27:34.000"
+          ]
+        }
+      },
+      "partition": "2025-01-01",
+      "removed": [],
+      "rows_after": 10873,
+      "rows_before": 10873
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-02",
+      "removed": [],
+      "rows_after": 13811,
+      "rows_before": 13811
+    },
+    {
+      "added": [],
+      "changed": {
+        "63618281": {
+          "closed_date": [
+            "",
+            "2026-08-27T14:56:33.000"
+          ],
+          "status": [
+            "In Progress",
+            "Closed"
+          ]
+        }
+      },
+      "partition": "2025-01-03",
+      "removed": [],
+      "rows_after": 11684,
+      "rows_before": 11684
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-04",
+      "removed": [],
+      "rows_after": 11459,
+      "rows_before": 11459
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-05",
+      "removed": [],
+      "rows_after": 13574,
+      "rows_before": 13574
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-06",
+      "removed": [],
+      "rows_after": 14141,
+      "rows_before": 14141
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-07",
+      "removed": [],
+      "rows_after": 15023,
+      "rows_before": 15023
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-08",
+      "removed": [],
+      "rows_after": 13319,
+      "rows_before": 13319
+    },
+    {
+      "added": [],
+      "changed": {
+        "63704984": {
+          "closed_date": [
+            "",
+            "2026-08-28T13:48:00.000"
+          ],
+          "status": [
+            "Assigned",
+            "Closed"
+          ]
+        }
+      },
+      "partition": "2025-01-09",
+      "removed": [],
+      "rows_after": 14906,
+      "rows_before": 14906
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-10",
+      "removed": [],
+      "rows_after": 14220,
+      "rows_before": 14220
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-11",
+      "removed": [],
+      "rows_after": 11420,
+      "rows_before": 11420
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-12",
+      "removed": [],
+      "rows_after": 11756,
+      "rows_before": 11756
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-13",
+      "removed": [],
+      "rows_after": 13049,
+      "rows_before": 13049
+    },
+    {
+      "added": [],
+      "changed": {},
+      "partition": "2025-01-14",
+      "removed": [],
+      "rows_after": 10079,
+      "rows_before": 10079
+    }
+  ]
+}
