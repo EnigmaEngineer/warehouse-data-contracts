@@ -27,6 +27,8 @@ source:
   partition_grain: day
 freshness:
   max_lag_hours: 48
+  reference: extract
+  applies_to: tail
   provenance: asserted
 volume:
   min_rows_per_partition: 1
@@ -115,12 +117,26 @@ def check_a_profile_that_evaluates_nothing_raises():
     raise AssertionError("a profile over zero columns has to be a failure")
 
 
-def check_the_unenforced_clauses_are_named():
-    # freshness and volume are in every contract this repo loads and nothing reads either
-    # of them. A clause with no evaluator behind it reads like an enforced rule to anyone
-    # opening the file, so the report has to say so.
+def check_nothing_in_the_contract_format_is_unevaluated_now():
+    # freshness and volume used to be here, in the file and read by nothing, which reads
+    # like an enforced rule to anyone opening the contract. contracts/feed.py evaluates
+    # both. The list stays because the next clause added will start out unread and this is
+    # what says so.
     contract = spec.parse(CONTRACT)
-    assert profile_mod.unevaluated_clauses(contract) == ["freshness", "volume"]
+    assert profile_mod.unevaluated_clauses(contract) == []
+
+
+def check_a_clause_with_no_evaluator_is_still_named():
+    # The check above passes on an empty list forever once the format stops growing, so it
+    # cannot show that the naming works. This adds a clause nothing reads and asserts it
+    # comes back.
+    contract = spec.parse(CONTRACT)
+    profile_mod.ALL_CLAUSES.add("retention")
+    contract.retention = {"days": 30}
+    try:
+        assert profile_mod.unevaluated_clauses(contract) == ["retention"]
+    finally:
+        profile_mod.ALL_CLAUSES.discard("retention")
 
 
 def check_the_clause_list_covers_every_top_level_clause():

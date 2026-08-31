@@ -23,11 +23,28 @@ freshness:
   # 311 is a live operational feed. Nothing in the metadata states a publishing SLA, so
   # this number is mine.
   max_lag_hours: 48
+
+  # A lag is a difference and the clause used to name only one side of it. Forty eight
+  # hours between what and what. `extract` means the gap between the newest event in a
+  # partition and the moment the fetch ran, which is the publisher's lag and is the thing
+  # an SLA is usually about. `wall_clock` measures from now instead, which on a fixed
+  # archive returns the age of the archive.
+  reference: extract
+
+  # And the scope, because a backfill re-reads history. Every partition it touches is old,
+  # so a freshness rule applied to all of them fires on all of them. `tail` judges the
+  # newest partition available and returns not_applicable for the rest.
+  applies_to: tail
   provenance: asserted
 
 volume:
   # A quiet day in a city of eight million still generates thousands of requests. Floor
   # set well below anything plausible so it catches a broken extract, not a slow Tuesday.
+  #
+  # Left at 4,000 deliberately. The smallest partition here holds 10,079, so this cannot
+  # fire, and raising it to a number that can would mean choosing it by looking at the
+  # fourteen partitions it is about to judge. scripts/feed_checks.py prints the distance
+  # instead, and what a fitted floor would cost on a corpus this short.
   min_rows_per_partition: 4000
   provenance: asserted
 

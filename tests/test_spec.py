@@ -22,6 +22,8 @@ source:
   partition_grain: day
 freshness:
   max_lag_hours: 48
+  reference: extract
+  applies_to: tail
   provenance: asserted
 volume:
   min_rows_per_partition: 10
@@ -169,3 +171,31 @@ def check_the_shipped_contract_loads():
     # without updating the README fails here rather than making the README wrong.
     assert c.constraint_count() == 20, c.constraint_count()
     assert c.asserted_count() == 13, c.asserted_count()
+
+
+def check_a_freshness_clause_with_no_reference_is_refused():
+    # A lag is a difference and this names one side of it. The three readings available
+    # give 14 stale, 1 stale and 0 stale on the same fourteen partitions, so a contract
+    # that leaves it out is not one rule with an unstated detail. It is three rules.
+    _refuses(GOOD.replace("  reference: extract\n", ""), "freshness is missing 'reference'")
+
+
+def check_a_freshness_clause_with_no_scope_is_refused():
+    _refuses(GOOD.replace("  applies_to: tail\n", ""), "freshness is missing 'applies_to'")
+
+
+def check_an_unknown_reference_is_refused_and_the_message_lists_the_real_ones():
+    _refuses(GOOD.replace("reference: extract", "reference: ingestion_time"),
+             "expected one of")
+
+
+def check_an_unknown_scope_is_refused():
+    _refuses(GOOD.replace("applies_to: tail", "applies_to: newest"), "expected one of")
+
+
+def check_the_shipped_contract_asks_for_the_reading_that_survives_a_backfill():
+    # Pinned because the difference is the whole finding. `tail` returns not_applicable on
+    # thirteen of fourteen partitions here, and `every_partition` fires on all fourteen.
+    c = spec.load(os.path.join(ROOT, "contracts", "nyc311.yml"))
+    assert c.freshness["reference"] == "extract", c.freshness
+    assert c.freshness["applies_to"] == "tail", c.freshness

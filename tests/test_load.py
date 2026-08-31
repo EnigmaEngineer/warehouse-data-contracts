@@ -32,6 +32,8 @@ source:
   partition_grain: day
 freshness:
   max_lag_hours: 1
+  reference: extract
+  applies_to: tail
   provenance: asserted
 volume:
   min_rows_per_partition: 1

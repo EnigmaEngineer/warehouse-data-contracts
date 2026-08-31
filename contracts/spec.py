@@ -14,6 +14,8 @@ the data, and the second kind cannot be violated by definition.
 
 import yaml
 
+from contracts import feed
+
 TYPES = {"string", "integer", "number", "timestamp"}
 PROVENANCE = {"documented", "asserted"}
 
@@ -205,6 +207,21 @@ def parse(text):
     _require(freshness, "provenance", "freshness")
     if freshness["provenance"] not in PROVENANCE:
         raise ContractError("freshness provenance is not documented or asserted")
+
+    # A lag is a difference and a clause naming only one side of it is not a rule. These
+    # two fields are refused when absent for the same reason provenance is. A contract that
+    # omits them still reads like it says something.
+    reference = _require(freshness, "reference", "freshness")
+    if reference not in feed.REFERENCES:
+        raise ContractError(
+            "freshness reference is '{}', expected one of {}".format(
+                reference, sorted(feed.REFERENCES)))
+
+    applies_to = _require(freshness, "applies_to", "freshness")
+    if applies_to not in feed.SCOPES:
+        raise ContractError(
+            "freshness applies_to is '{}', expected one of {}".format(
+                applies_to, sorted(feed.SCOPES)))
 
     volume = _require(raw, "volume", "contract")
     _require(volume, "min_rows_per_partition", "volume")

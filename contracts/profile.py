@@ -22,7 +22,7 @@ class NothingChecked(RuntimeError):
 # behind it reads to anyone opening the contract like a rule that is being enforced. It is
 # decoration, and the only honest way to carry one is to say out loud that nothing reads
 # it.
-EVALUATED_CLAUSES = {"columns", "checks"}
+EVALUATED_CLAUSES = {"columns", "checks", "freshness", "volume"}
 ALL_CLAUSES = {"columns", "checks", "freshness", "volume"}
 
 
