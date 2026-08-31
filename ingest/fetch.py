@@ -122,8 +122,18 @@ def sha256(path):
     return h.hexdigest()
 
 
-def fetch_day(day, out_dir):
-    """Fetch the window and refuse it unless the API agrees on how many rows it holds."""
+def fetch_day(day, out_dir, now=None):
+    """Fetch the window and refuse it unless the API agrees on how many rows it holds.
+
+    `fetched_at` is recorded because a freshness clause reading `extract` needs it and
+    nothing else in the pipeline can recover it later. A file's mtime is a fact about the
+    filesystem rather than about the fetch, and the fourteen partitions written before this
+    line existed have no honest way to get one. They report no_extract_time instead.
+
+    Taken before the request rather than after, so a slow page does not get counted as
+    publisher lag.
+    """
+    started = now or datetime.datetime.now()
     expected = expected_rows(day)
     rows = fetch_rows(day)
     if len(rows) != expected:
@@ -137,6 +147,7 @@ def fetch_day(day, out_dir):
         "expected_rows": expected,
         "bytes": os.path.getsize(path),
         "sha256": sha256(path),
+        "fetched_at": started.strftime("%Y-%m-%dT%H:%M:%S"),
         "path": os.path.relpath(path, os.path.dirname(out_dir)),
     }
 
