@@ -37,7 +37,7 @@ trap 'rm -f "$LOG"' EXIT
 airflow dags reserialize >/dev/null 2>&1
 airflow dags test nyc311_contract_check "$PARTITION" >"$LOG" 2>&1 || true
 
-EXPECTED="pull check load_raw transform"
+EXPECTED="pull check feed_checks load_raw transform"
 MISSING=""
 for task in $EXPECTED; do
   if ! grep -q "end task task_id=$task" "$LOG"; then
