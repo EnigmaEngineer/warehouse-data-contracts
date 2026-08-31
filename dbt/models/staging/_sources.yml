@@ -12,12 +12,16 @@ sources:
         description: One row per accepted service request. Text in every column.
         columns:
           - name: unique_key
-            description: The publisher's identifier for a request.
-            data_tests:
-              - not_null
-              - unique
+            description: >
+              The publisher's identifier for a request. The not_null and unique tests that
+              used to sit here are generated now, in _generated.yml, from the same two
+              lines of the contract. Two copies would have run the same query twice and
+              inflated the test count.
           - name: _partition
-            description: The day this row was fetched under. The delete key on a reload.
+            description: >
+              The day this row was fetched under. The delete key on a reload. This one
+              stays hand written because the contract has no column of that name. It is
+              the loader's, not the source's.
             data_tests:
               - not_null
 

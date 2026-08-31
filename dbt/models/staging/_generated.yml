@@ -1,0 +1,56 @@
+# Generated from contracts/nyc311.yml by scripts/generate_dbt_tests.py. Do not edit.
+#
+# 9 of 23 contract constraints reach dbt. 9 have no generic
+# test in dbt core and stay in the validator, and 5 assert nothing to begin with.
+# The ones that made it are presence, uniqueness and vocabulary. Every rule that reads the
+# shape of a value and every rule that reads two columns is in the other pile.
+#
+# These run against the table and the validator ran against the file. Same rules, two
+# subjects, and this repo has already found two defects living in the gap between them.
+
+version: 2
+sources:
+- name: contract
+  schema: raw
+  tables:
+  - name: nyc311_service_requests
+    columns:
+    - name: unique_key
+      data_tests:
+      - not_null
+      - unique
+    - name: created_date
+      data_tests:
+      - not_null
+    - name: agency
+      data_tests:
+      - not_null
+    - name: complaint_type
+      data_tests:
+      - not_null
+    - name: borough
+      data_tests:
+      - accepted_values:
+          arguments:
+            values:
+            - BRONX
+            - BROOKLYN
+            - MANHATTAN
+            - QUEENS
+            - STATEN ISLAND
+            - Unspecified
+      - not_null
+    - name: status
+      data_tests:
+      - accepted_values:
+          arguments:
+            values:
+            - Open
+            - Closed
+            - Assigned
+            - Pending
+            - In Progress
+            - Started
+            - Draft
+            - Unspecified
+      - not_null
