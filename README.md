@@ -638,7 +638,7 @@ whose attributes were measured changing.
 
 ```
 python tests/run_all.py
-175 passed, 0 failed
+219 passed, 0 failed
 ```
 
 Plain functions named `check_*`, no framework. Nothing in `tests/` needs Airflow or dbt
@@ -646,8 +646,8 @@ installed. `tests/test_dbt_project.py` reads the dbt project rather than running
 `scripts/dbt.sh build` is the real check. The DAG is the other gap and
 `scripts/dag_smoke.sh` is that one.
 
-A mutation pass over the nine library modules kills 221 of 227, with the control clean
-before and after each call:
+A mutation pass over the eleven library modules, with the control clean before and after
+every call. The two newest modules were run today and killed 59 of 61:
 
 ```
 python ../portfolio-program/scripts/mutate.py --repo . \
@@ -658,9 +658,36 @@ python ../portfolio-program/scripts/mutate.py --repo . \
   --module warehouse/load.py --module warehouse/history.py
 
 221 killed, 6 survived
+
+python ../portfolio-program/scripts/mutate.py --repo . --module contracts/generate.py
+17 killed, 1 survived
+
+python ../portfolio-program/scripts/mutate.py --repo . \
+  --module contracts/feed.py --slice 0:22
+python ../portfolio-program/scripts/mutate.py --repo . \
+  --module contracts/feed.py --slice 22:43
+42 killed, 1 survived
 ```
 
-Every module was measured against the tree above. Nothing is carried from an earlier run.
+The slices are there because a 43 site module against a 4.3 second suite is 185 seconds and
+the machine this runs on kills a call before that. The control runs at both ends of every
+call, so a split pass is worth the same as a whole one and the counts add up by hand.
+
+The first pass over `contracts/feed.py` went 38 of 43 and four of the five survivors were
+real. A ratio asserted as `> 2.5` survived its division becoming a multiplication. A floor
+compared against the smallest partition survived `>` becoming `>=`, because no fixture put
+one exactly on the other. The fitted floor survived its band being added instead of
+subtracted, because the fixture was a series where a majority share one value, so the MAD is
+zero and both signs give the median. And the default holdout was never asserted, only the
+default `k` beside it. Fixed, then re-run to 42 of 43.
+
+The two that survive are constants a check cannot reach. `>` against `>=` while scanning for
+a maximum returns the same maximum, and a yaml line width of 100 or 101 produces the same
+document when no line is that long.
+
+The nine older modules were measured against an earlier tree. `contracts/spec.py`,
+`contracts/profile.py` and `ingest/fetch.py` have changed since and have not been re-run,
+so their share of that 221 is a figure about the code as it was.
 
 Three survivors were real and all three are closed. `ingest/compare.py` refused a
 comparison when either side was empty rather than when both were, which would have thrown
@@ -688,13 +715,23 @@ nothing under any input. An argument no caller uses is not a branch missing a te
   would judge. The DAG carries a TODO saying so rather than a task that pretends.
 - **Nothing reads the quarantine back.** The held rows are written and no later step
   re-judges them, retries them, or expires them. A quarantine you never empty is a folder.
-- **The dbt tests are hand written and the contract is not generating them.** The status
-  vocabulary exists twice, once in `contracts/nyc311.yml` and once in
-  `models/silver/_silver.yml`, and `tests/test_dbt_project.py` asserts the two lists match.
-  That stops them drifting. It is not validation, and the difference matters. Generating
-  the dbt tests from the contract makes them a second implementation of one rule, and two
-  implementations of one rule cannot be graded against each other. Comparing two copies of
-  one literal list can.
+- **Nine of twenty three contract constraints reach dbt and the other fourteen stay in the
+  validator.** That is not a gap to close. dbt core has four generic tests and no package is
+  installed here, so a range bound or a regex or a two column rule has nowhere to go. The
+  silver models still carry hand written tests for the same reason.
+- **Nothing fails a run on freshness or volume.** Both clauses are evaluated and both print
+  a verdict, and the DAG carries on either way. A live day that is still being published
+  trips the volume floor legitimately, so what a `below_floor` verdict should do to a run is
+  the same policy question the row level split has, and inventing a threshold here would be
+  choosing one by looking at the partitions it judges.
+- **`applies_to: tail` means newest in the manifest, not newest in the feed.** A backfill
+  still reads stale on its last partition. It stops the other thirteen alerts and it does
+  not tell a backfill apart from a broken feed, which needs the DAG to say which one it is
+  doing.
+- **`data/warehouse.duckdb` is gitignored and can be older than the loader.** The copy on
+  this machine was built before the hive partitioning fix and still held the overwritten
+  column, and `scripts/dag_smoke.sh` defaults to exactly that path. Rebuild with
+  `python scripts/load_raw.py` rather than trusting a database that is not in the history.
 - **The snapshot is judged on four rows.** Two extracts three days apart moved four rows
   out of 179,314, so `superseded` is 4. The mechanism is exercised and the sample is tiny,
   and a wider window is a longer wait rather than more code.
@@ -725,25 +762,180 @@ nothing under any input. An argument no caller uses is not a branch missing a te
   against stubs. The real round trip runs in `scripts/pull_source.py` and in the DAG, and
   neither is in `tests/`.
 
-## Two clauses in the contract that nothing reads
+## A lag is a difference and the clause named one side of it
+
+`freshness.max_lag_hours: 48` sat in this contract for days, unread by anything, and it
+reads like a rule. Forty eight hours between what and what. Three answers are available and
+they are not close to each other. Here they are on the same fourteen partitions, from
+`scripts/feed_checks.py`.
+
+| reference | what it measures from | verdicts |
+|---|---|---|
+| `wall_clock`, every partition | now | 14 stale |
+| `wall_clock`, tail only | now | 1 stale, 13 not applicable |
+| `partition_end`, every partition | the end of the partition's own day | 14 ok, every lag 0.0h |
+| `extract`, tail only | the moment the fetch ran | 1 stale, 13 not applicable |
+
+Same data, same threshold, and the answer is 14 refusals or 1 or none depending on which
+reading the implementer happened to pick. So `reference` is now a field and
+`contracts/spec.py` refuses a contract without it, the same way it refuses one without
+`provenance`.
+
+`partition_end` is in the list to be rejected rather than because anyone should use it. A
+partition cannot hold an event after its own day ends, so that lag cannot exceed one grain
+and it came back 0.0h on all fourteen. It is the reading that can never fail.
+
+`wall_clock` is what people mean and it is a statement about a live feed. Pointed at an
+archive it returns the age of the archive, which is true and useless. `extract` measures
+from the fetch instead, so it does not drift while the file sits on disk. That needs a fetch
+time and nothing was recording one. `ingest/fetch.py` writes `fetched_at` into the manifest
+now, and the partitions written before that line existed return `no_extract_time` rather
+than `ok`. A check with no input has to refuse. Passing is the wrong answer and it is the
+easy one.
+
+### Scope is doing more work than the reference
+
+The second field is `applies_to`, and it is the one that stops the rule being useless. A
+freshness clause is a statement about the tail of a feed. A backfill re-reads history, so
+every partition it touches is old and a rule applied to all of them fires on all of them.
+Under `every_partition` this clause refuses all fourteen. A guardrail that refuses
+everything correct gets switched off, and then it protects nothing.
+
+`tail` is not a full answer either, and the limit is visible in the table above. It means
+newest in the manifest rather than newest in the feed, so a backfill still reads stale on
+its own last partition. What it stops is thirteen duplicates of that one alert.
+
+### The clause is not vacuous, and one fetch is what shows it
+
+Fourteen archive partitions refusing under every reading that is not `partition_end` is
+indistinguishable from a broken check. `scripts/live_feed_probe.py` fetches one recent day
+and one archive day into a temporary directory and reads both.
 
 ```
-contract clauses nothing here evaluates: freshness, volume
-  they are in the file and they are not enforced by anything yet
+freshness  limit 48h  reference extract
+  recent  2026-08-30  rows   1121  newest 2026-08-30 02:31:07  lag     37.00h  ok
+  archive 2025-01-14  rows  10079  newest 2025-01-14 23:59:43  lag  14247.52h  stale
 ```
 
-`freshness.max_lag_hours` and `volume.min_rows_per_partition` are in every contract this
-repo loads, `contracts/spec.py` refuses a contract that omits either, and no code path
-evaluates them. They read to anyone opening the file like rules being enforced. So the
-report names them, because the alternative is a YAML file that overstates what runs.
+So the rule can pass. The asserted 48 hours was never checked against the feed and it turns
+out to clear the feed's real publishing lag by about eleven hours.
 
-Both are wrong in an instructive way as well as unimplemented. The volume floor is 4,000
-and the smallest partition here holds 10,079, so a rule sitting 6,079 rows below anything
-observed cannot bind. The freshness clause is worse. It says 48 hours, the corpus is a
-January 2025 archive, and the newest partition is about 14,160 hours old. Implemented as
-written it would fail every partition in the repo on the day it shipped.
+## The floor that could not fire, and the first live day that tripped it
 
-The clause describes the live 311 feed and the corpus is a fixed archive of it. Those are
-two different things and the format currently has no way to say which one a rule is about.
-That is the design problem to solve before the freshness check gets built, rather than
-after.
+`volume.min_rows_per_partition` is 4,000 and the smallest partition in the corpus holds
+10,079. The floor sits 6,079 rows below anything ever observed, a ratio of 2.52, so it
+cannot bind. It is still 4,000. Raising it to a number that can fire would mean choosing it
+by looking at the fourteen partitions it is about to judge, and `scripts/feed_checks.py`
+prints the distance instead of hiding it.
+
+What a fitted floor would cost, from the same script, nine partitions to train and five held
+back:
+
+```
+  median 13574  mad 1332  floor at median minus 3.0x mad 9578
+  out of sample fires 0 of 5, rate 0.000
+  smallest rate this holdout can report at all: 0.200
+```
+
+A rate measured on five partitions comes in fifths. Any gate below 0.2 cannot be measured
+against this corpus at any effect size, so a fitted floor here would be a number with no way
+to check it. The corpus is too short and that is the answer rather than a worse floor.
+
+Then the same clause against the live feed, from `scripts/live_feed_probe.py`:
+
+```
+  2026-08-27     10028  2026-08-27T23:59:58.000 Thu  ok
+  2026-08-28     10765  2026-08-28T23:59:56.000 Fri  ok
+  2026-08-29      9009  2026-08-29T23:59:53.000 Sat  ok
+  2026-08-30      1121  2026-08-30T02:31:07.000 Sun  below_floor
+  2026-08-31         0  none                    Mon  below_floor
+
+  floor 4000 fired on 2 of 15 live days
+```
+
+Thirteen settled days run 9,009 to 11,665 rows and every one ends at 23:59. The two that
+fire end early or hold nothing, because the feed publishes more than a day behind and those
+days are still being written. The floor that cannot bind on any of fourteen archive
+partitions binds on the first live partition anyone fetched.
+
+That is not a lucky threshold. The corpus is fourteen consecutive complete January days and
+it contains no example of the thing the floor was written to catch. Running a guardrail over
+data that cannot break it says nothing about the guardrail.
+
+Two things follow. The completeness guard in `ingest/fetch.py` refuses a partition unless
+the API's own `count(1)` matches the fetch, and on 2026-08-30 it agreed at 1,121. It proves
+the transfer was complete and it has no opinion about whether the source was. And freshness
+passed that same partition at 37.00h against a 48h limit while volume refused it, which is
+the whole difference between the two clauses. One asks when the data arrived. Neither of
+them asks whether all of it did, and only volume notices by accident.
+
+## The contract generates nine of its twenty three constraints
+
+`scripts/generate_dbt_tests.py` writes `dbt/models/staging/_generated.yml` from
+`contracts/nyc311.yml`.
+
+```
+23 contract constraints
+  generated              9
+  no_dbt_equivalent      9
+  nothing_to_generate    5
+  reaching dbt: 9 of 23, 39.1%
+```
+
+dbt core ships four generic tests and nothing here installs a package, so that is the whole
+vocabulary. Presence, uniqueness and vocabulary survive the trip. Every rule that reads the
+shape of a value has no equivalent, which is one `max_length`, one regex and four range
+bounds. So does every rule that reads two columns, which is all three cross column checks.
+The five that generate nothing are nullable columns, where `required: false` asserts nothing
+and emitting `not_null` would refuse every open request in the feed.
+
+The denominator comes out of the contract rather than a list kept beside the mapper, and
+`tests/test_generate.py` drives itself off `spec.COLUMN_RULES` so a rule added to the format
+and forgotten in the mapper fails rather than quietly improving the percentage.
+
+### Running the generated tests against the accepted rows proves nothing
+
+They pass. `bash scripts/dbt.sh build` is `PASS=36 ERROR=0` over 30 data tests. That result
+is worth nothing, because the accepted table is what came out of the quarantine and a test
+on it can only confirm the split did what the splitter said.
+
+So `scripts/generated_tests_probe.py` points dbt's own compiled SQL at the other side, the
+572 rows the validator refused.
+
+```
+572 quarantined rows over 14 partitions
+  closed_request_has_a_closed_date:check:requires_when 493
+  open_request_has_no_closed_date:check:forbids_when 67
+  closed_after_created:check:ordering and open_request_has_no_closed_date:...  12
+
+9 of 9 generated tests find nothing in the held rows
+```
+
+Every one of the 572 was held by a cross column check, and no cross column check has a dbt
+equivalent. So the nine constraints that reach dbt are exactly the nine that have never
+refused a row here, and the three that refused all 572 are in the pile dbt cannot express.
+Generating the tests from the contract ships the half of the contract with nothing to say.
+
+Nine tests all coming back silent is also what a probe pointed at an empty table looks like.
+The probe poisons two rows and requires two named tests to notice before it will report
+anything.
+
+```
+control, two poisoned rows added to the probe table
+  not_null_agency                                            1
+  accepted_values_contrac_9eefa1db368cfbdb2ae0ff60effd4a96   2
+  control passed, so the silence above is the data and not the probe
+```
+
+The reason to generate them at all is the subject rather than the rule. The validator reads
+the CSV before the load and dbt reads the table after it, and this repo has already lost two
+arguments in the gap between those two. A zip starting with a zero passes the five digit
+rule on the file and fails it in a table whose reader chose an integer. A directory name
+overwrote the column it names on every row without a single count moving. One rule evaluated
+at two points is a check with something to say. It is not redundancy and it is not
+validation either.
+
+Generation also moves the two copies problem rather than removing it. The status vocabulary
+used to live in the contract and again in a hand written yml. It now lives in the contract
+and again in a generated file, and `scripts/generate_dbt_tests.py --check` plus a check in
+`tests/test_generate.py` is what stops those drifting.
