@@ -287,3 +287,68 @@ def check_the_reason_column_names_every_rule_a_row_broke():
     ))
     text = quarantine.reasons(v.failures[2])
     assert "n:max" in text and "state:allowed" in text, text
+
+
+def check_a_row_held_only_by_a_key_collision_is_separated_from_a_bad_row():
+    """A uniqueness failure is not a statement about the row.
+
+    Two rows share a value, the contract cannot say which is real, and both go. Folded
+    into one held count that is invisible, so a replayed upstream job reads as a partition
+    full of bad data. The fixture carries one genuinely bad row so the two numbers differ.
+    """
+    v = validate.validate(contract(), rows(
+        ("a", "1", "open"), ("a", "2", "open"), ("c", "99", "open"),
+        ("d", "4", "open"), ("e", "5", "open"),
+    ))
+    assert v.bad_rows == 3, v.failures
+    assert v.held_only_by("unique") == {0, 1}, v.held_only_by("unique")
+
+
+def check_a_row_breaking_a_rule_as_well_as_the_key_is_not_a_bystander():
+    """The row at index 1 collides and is also out of range. It is a bad row that happens
+    to collide, not a row held only because another one exists."""
+    v = validate.validate(contract(), rows(
+        ("a", "1", "open"), ("a", "99", "open"), ("c", "3", "open"),
+        ("d", "4", "open"), ("e", "5", "open"),
+    ))
+    assert v.held_only_by("unique") == {0}, v.held_only_by("unique")
+
+
+def check_held_only_by_is_empty_when_nothing_collided():
+    v = validate.validate(contract(), rows(
+        ("a", "1", "open"), ("b", "99", "open"), ("c", "3", "open"),
+        ("d", "4", "open"), ("e", "5", "open"),
+    ))
+    assert v.held_only_by("unique") == set(), v.held_only_by("unique")
+
+
+def check_the_largest_collision_is_the_size_of_the_biggest_group():
+    v = validate.validate(contract(), rows(
+        ("a", "1", "open"), ("a", "2", "open"), ("a", "3", "open"),
+        ("d", "4", "open"), ("d", "5", "open"), ("f", "6", "open"),
+    ))
+    assert v.largest_collision() == 3, v.collisions
+    assert v.collisions == {"k": {"a": 3, "d": 2}}, v.collisions
+
+
+def check_the_largest_collision_on_a_clean_partition_is_one():
+    """One rather than zero. Every key appears once, and a floor of zero would read as a
+    partition with no keys in it."""
+    v = validate.validate(contract(), rows(
+        ("a", "1", "open"), ("b", "2", "open"), ("c", "3", "open"),
+        ("d", "4", "open"), ("e", "5", "open"),
+    ))
+    assert v.largest_collision() == 1, v.collisions
+    assert v.collisions == {}, v.collisions
+
+
+def check_a_null_key_is_not_a_collision():
+    """Two absent keys are not two rows claiming the same identity. Both are held by the
+    required rule and neither is a bystander."""
+    v = validate.validate(contract(), rows(
+        ("", "1", "open"), ("", "2", "open"), ("c", "3", "open"),
+        ("d", "4", "open"), ("e", "5", "open"),
+    ))
+    assert v.collisions == {}, v.collisions
+    assert v.held_only_by("unique") == set(), v.held_only_by("unique")
+    assert v.bad_rows == 2, v.failures

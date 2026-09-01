@@ -177,6 +177,26 @@ def check_the_report_file_has_sorted_keys_so_two_runs_can_be_diffed():
         keys = [line.split('"')[1] for line in text.splitlines()
                 if line.startswith("  \"")]
         assert keys == sorted(keys), keys
+        # The indent is part of the claim. A diff between two runs is only readable if
+        # the layout is the same in both, and the loop above finds nothing at all if the
+        # top level keys move to a different column.
+        assert len(keys) > 5, keys
+    finally:
+        shutil.rmtree(out)
+
+
+def check_the_load_and_the_report_agree_about_the_field_names():
+    """The loader reads `accepted` and `held` out of this file by name. Renaming either
+    one here would break the load and nothing in this file would notice."""
+    data = dirty()
+    v = validate.validate(contract(), data)
+    out = tempfile.mkdtemp(prefix="wdc-fields-")
+    try:
+        quarantine.write(out, FIELDS, data, v, "2025-01-06")
+        with open(os.path.join(out, "report.json")) as fh:
+            report = json.load(fh)
+        for key in ("partition", "accepted", "held"):
+            assert key in report, (key, sorted(report))
     finally:
         shutil.rmtree(out)
 
@@ -209,3 +229,39 @@ def check_the_reasons_string_lists_the_rules_rather_than_a_count():
     text = held[0][quarantine.REASON_COLUMN]
     assert "n:max" in text and "state:allowed" in text, text
     assert quarantine.REASON_SEPARATOR in text, text
+
+
+# k carries no uniqueness rule in the contract above, on purpose, because most checks in
+# this file are about the split rather than about keys. The two below need one.
+KEYED = CONTRACT.replace("  - name: k\n    type: string\n    provenance: documented\n"
+                         "    required: true\n",
+                         "  - name: k\n    type: string\n    provenance: documented\n"
+                         "    required: true\n    unique: true\n")
+
+
+def keyed():
+    return spec.parse(KEYED)
+
+
+def check_the_report_separates_the_bystanders_from_the_bad_rows():
+    """A held count on its own cannot tell one replayed job from a partition of bad data.
+
+    The fixture has one row that is genuinely out of range and a pair sharing a key. Three
+    rows held, one of them bad and two of them bystanders.
+    """
+    data = rows(("a", "1", "open"), ("a", "2", "open"), ("c", "99", "open"),
+                ("d", "4", "open"), ("e", "5", "open"))
+    v = validate.validate(keyed(), data)
+    summary = quarantine.report(v, "2025-01-01")
+    assert summary["held"] == 3, summary
+    assert summary["held_only_by_a_key_collision"] == 2, summary
+    assert summary["largest_key_collision"] == 2, summary
+
+
+def check_the_report_says_one_when_no_key_collided():
+    data = rows(("a", "1", "open"), ("b", "2", "open"), ("c", "99", "open"),
+                ("d", "4", "open"), ("e", "5", "open"))
+    summary = quarantine.report(validate.validate(keyed(), data), "2025-01-01")
+    assert summary["held"] == 1, summary
+    assert summary["held_only_by_a_key_collision"] == 0, summary
+    assert summary["largest_key_collision"] == 1, summary

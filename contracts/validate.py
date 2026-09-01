@@ -39,7 +39,8 @@ class RowFailure:
 
 
 class Validation:
-    def __init__(self, rows, failures, considered, evaluations, missing, uncontracted):
+    def __init__(self, rows, failures, considered, evaluations, missing, uncontracted,
+                 collisions=None):
         self.rows = rows
         # Sparse on purpose. A clean partition of 179,314 rows should not build 179,314
         # empty lists to say so.
@@ -48,6 +49,9 @@ class Validation:
         self.evaluations = evaluations
         self.missing = missing
         self.uncontracted = uncontracted
+        # {column: {value: count}} for every value that repeated. Empty on a clean
+        # partition and the whole file on a replayed one.
+        self.collisions = collisions or {}
 
     @property
     def bad_rows(self):
@@ -78,6 +82,31 @@ class Validation:
 
     def rows_breaking_more_than_one_rule(self):
         return sum(1 for f in self.failures.values() if len(f) > 1)
+
+    def held_only_by(self, rule):
+        """Rows whose every failure is this rule, as a set of indexes.
+
+        Written for `unique`, and the reason is that a uniqueness failure is not a
+        statement about the row. Two rows share a value, the contract says the value
+        identifies one request, and nothing in it says which copy is real. Both are held
+        and at least one of them was fine. Folded into a single held count that is
+        invisible, so one replayed upstream job reads as a partition full of bad data.
+        """
+        return set(i for i, fs in self.failures.items()
+                   if fs and all(f.rule == rule for f in fs))
+
+    def largest_collision(self):
+        """The size of the biggest group sharing one value on a unique column.
+
+        One is the answer when nothing repeated. This is the blast radius of a single
+        collision and it has no ceiling. A whole partition replayed puts every row in a
+        group of two.
+        """
+        largest = 1
+        for counts in self.collisions.values():
+            for n in counts.values():
+                largest = max(largest, n)
+        return largest
 
 
 def _unique_columns(contract, present):
@@ -112,9 +141,13 @@ def validate(contract, rows, header=None):
     # column before any row is judged. Both copies of a duplicated key are held. The
     # contract says the value identifies one request and says nothing about which copy is
     # the real one, so letting one through would be picking by file order.
+    collisions = {}
     dupes = {}
     for column in _unique_columns(contract, present):
-        dupes[column.name] = rules.duplicated(r.get(column.name) for r in rows)
+        counts = rules.duplicate_counts(r.get(column.name) for r in rows)
+        if counts:
+            collisions[column.name] = counts
+        dupes[column.name] = set(counts)
 
     predicates = [(c, rules.value_rules(c)) for c in judged]
 
@@ -171,7 +204,7 @@ def validate(contract, rows, header=None):
         )
 
     return Validation(len(rows), failures, considered, evaluations,
-                      missing, uncontracted)
+                      missing, uncontracted, collisions)
 
 
 def validate_file(contract, path):

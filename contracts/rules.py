@@ -128,17 +128,29 @@ def value_rules(column):
     return out
 
 
-def duplicated(values):
-    """The set of values that appear more than once among the ones present."""
-    seen = set()
-    dupes = set()
+def duplicate_counts(values):
+    """How many times each repeated value appears, among the ones present.
+
+    The size of the largest group is the blast radius of one collision. A key arriving
+    eleven times costs eleven rows, because the contract says the value identifies one
+    request and never says which of the eleven is the real one. A count of held rows alone
+    cannot tell that apart from eleven separately broken rows.
+    """
+    counts = {}
     for v in values:
         if is_null(v):
             continue
-        if v in seen:
-            dupes.add(v)
-        seen.add(v)
-    return dupes
+        counts[v] = counts.get(v, 0) + 1
+    return dict((v, n) for v, n in counts.items() if n > 1)
+
+
+def duplicated(values):
+    """The set of values that appear more than once among the ones present.
+
+    One implementation, because two would eventually give two answers and nothing here
+    would be comparing them.
+    """
+    return set(duplicate_counts(values))
 
 
 def evaluate(column, values):

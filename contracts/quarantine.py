@@ -65,6 +65,13 @@ def report(validation, partition, path=None):
         "held_share": round(validation.bad_rows / validation.rows, 6)
         if validation.rows else 0.0,
         "rows_breaking_more_than_one_rule": validation.rows_breaking_more_than_one_rule(),
+        # Both of these are about one failure mode and it is the only one where a held row
+        # is not necessarily a bad row. Two rows share a key, the contract cannot say which
+        # is real, so both go. One replayed upstream job can therefore take an unbounded
+        # share of a partition with nothing individually wrong in it. A single held count
+        # hides that completely, which is why these are separate fields rather than a note.
+        "held_only_by_a_key_collision": len(validation.held_only_by("unique")),
+        "largest_key_collision": validation.largest_collision(),
         "sum_of_rule_counts": validation.sum_of_rule_counts(),
         "largest_rule_count": validation.largest_rule_count(),
         "rule_evaluations": validation.evaluations,
