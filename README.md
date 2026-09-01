@@ -11,7 +11,11 @@ python scripts/profile_source.py
 python scripts/quarantine_partition.py --write
 python scripts/load_raw.py --twice
 bash scripts/dbt.sh build
+python scripts/break_probe.py
 ```
+
+The last one breaks the contract eleven ways on purpose and checks that each refusal came
+from the rule it names.
 
 The source is the NYC 311 service request feed, dataset `erm2-nwe9` on
 `data.cityofnewyork.us`. Real municipal data with real defects in it, rather than a
@@ -316,6 +320,268 @@ rows in the table are not the rows in the file.
 
 The first four are counts and the fifth is not. That distinction is the whole content of
 the section above.
+
+`LoadCountMismatch` used to be raised after the commit. The rows were already in the table
+and the ledger while the caller was handling an exception saying the load had failed. Every
+check in the suite still passed, because they all asked whether the refusal happened rather
+than what the table held afterwards. It surfaced while writing the backfill below, which is
+the first thing here that asks what a failure leaves behind.
+
+## A backfill is a range, and a directory listing is not one
+
+```
+python scripts/backfill_probe.py
+```
+
+Reloading one partition is safe. Reloading a range brings three problems that a single load
+does not have, and the probe measures all three.
+
+**A rerun changes nothing.**
+
+```
+pass one   178742 loaded, 0 replaced, fingerprint 178742:2213f6d310b3
+pass two   178742 loaded, 178742 replaced, fingerprint 178742:2213f6d310b3
+identical
+ledger rows after two passes: 14
+```
+
+The second pass reports every row as replaced rather than as new, which is what says the
+delete ran. Fourteen ledger rows after two passes rather than twenty eight, because the
+ledger row is deleted with the partition.
+
+**A gap is refused rather than skipped.**
+
+```
+refused, naming ['2025-01-08']
+a loop over the directory listing would have loaded 13 days and printed a success
+```
+
+`backfill.plan` takes a start and an end, expands the range day by day, and refuses when a
+day inside it has not been judged. Iterating whatever directories happen to exist gives a
+success with a hole in it, and the hole is found weeks later by an analyst.
+
+**A range is not one transaction.**
+
+```
+stopped at 2025-01-07 after 6 partitions
+committed: 2025-01-01, 2025-01-02, 2025-01-03, 2025-01-04, 2025-01-05, 2025-01-06
+cause: LoadCountMismatch
+the table holds 6 partitions, and 2025-01-07 is absent, so that one rolled back
+```
+
+Each partition commits on its own. Wrapping the loop in one transaction would hold every
+delete open until the last insert, so a long backfill becomes one long lock with nothing
+recoverable in it. The shape stays and `BackfillStopped` carries the list of partitions that
+did land. Knowing a backfill failed is not enough to resume it. Knowing where it stopped is.
+
+**And a rerun cannot remove.**
+
+```
+backfilled 2025-01-01 to 2025-01-13 over a source that no longer has 2025-01-14
+orphans: 2025-01-14
+the table still holds 10046 rows for it, and the ledger agrees, so reconcile is silent
+drift reported by reconcile: 0
+```
+
+This is the one that surprised me. Delete then insert converges each partition on its
+source, and it can never touch a day the range was not given. A partition the source has
+dropped sits in the table forever, feeding the marts, reconciling cleanly against a ledger
+that agrees with it. `backfill.orphans` finds them and does nothing else. Deleting on the
+strength of an absent directory would empty the warehouse the first day a fetch comes back
+short, which is a far more likely event than a publisher withdrawing a day.
+
+## Every rule, broken on purpose, with a control
+
+```
+python scripts/break_probe.py
+
+partition 2025-01-06 holds 14141 rows, 14086 of them clean
+
+break                  rule expected to catch it                            wrote held  amp named  control
+required_null          agency:required                                          1    1  1.0 yes    clean
+not_allowed            borough:allowed                                          1    1  1.0 yes    clean
+too_long               agency:max_length                                        1    1  1.0 yes    clean
+bad_pattern            incident_zip:matches                                     1    1  1.0 yes    clean
+out_of_range           latitude:max                                             1    1  1.0 yes    clean
+not_a_number           longitude:type:number                                    1    1  1.0 yes    clean
+duplicate_key          unique_key:unique                                        1    2  2.0 yes    clean
+closed_before_created  closed_after_created:check:ordering                      1    1  1.0 yes    clean
+closed_with_no_date    closed_request_has_a_closed_date:check:requires_when     1    1  1.0 yes    clean
+open_with_a_date       open_request_has_no_closed_date:check:forbids_when       1    1  1.0 yes    clean
+wrong_agency           none, nothing reads it                                   1    0  0.0 yes    n/a
+
+11 of 11 breaks behaved as named
+```
+
+A demonstration that a rule refuses something is nearly worthless on its own, because a
+refusal can come from two other places. The row might have been bad before anything touched
+it. Or a different rule might catch the same damage, in which case deleting the rule under
+test would change nothing at all.
+
+So each break does two things a demonstration usually skips. Targets are chosen from the
+rows the contract currently accepts, which is why the clean count is printed first. And the
+`control` column is a second judgement of the same damaged rows against a contract with
+exactly that one rule removed. A break whose control still says held is not testing the rule
+its name claims.
+
+`not_a_number` is the odd one. Every other rule has a key in the YAML that can be deleted,
+and `type` does not. It is implied by the column existing. Its control has to remove the
+whole column, and `drop_column` refuses to do that for a column any cross column check
+reads, because that would relax two rules and the break would then prove less than it says.
+
+`wrong_agency` is in the table to get through. It writes a real agency acronym into the
+wrong row. `required` passes, `max_length` passes, the type passes. The contract constrains
+the shape of that value and has nothing to say about whether it is true.
+
+## One replayed job holds a whole partition, and 110 rows were the bad ones
+
+Both copies of a duplicated key are held. That is right, because the contract says the value
+identifies one request and never says which copy is real, so letting one through would be
+picking by file order. What was missing was a number.
+
+```
+the partition replayed once:
+  28282 rows in, 28282 held, 1.0000 of the file
+  28172 of those are held only by a key collision
+  largest group sharing one key is 2
+  on the untouched partition it is 1 and 0 held only by a collision
+```
+
+One upstream job replayed, and the quarantine takes the entire partition. Of the 28,282
+rows held, 110 are the 55 genuinely bad rows in two copies. The other 28,172 have nothing
+wrong with them beyond existing twice.
+
+A single held count cannot tell those apart, so `report.json` now carries two more fields.
+`held_only_by_a_key_collision` counts the rows whose every failure is a uniqueness one.
+`largest_key_collision` is the size of the biggest group sharing a value, which is one on a
+clean partition and has no ceiling. Both are zero and one on all fourteen real partitions,
+because `unique_key` has never collided here, and that is exactly why the branch needed a
+break to exercise it.
+
+There is still no cap. A cap is a policy and picking one today would mean picking it off the
+fourteen partitions it would judge.
+
+## Two of sixteen constraints are the only reason anything is held
+
+```
+python scripts/quarantine_partition.py --marginal
+
+constraint                                           sole reason
+unique_key:required                                           0
+unique_key:unique                                             0
+created_date:required                                       n/a  the only rule on this column
+closed_date:required                                        n/a  permits rather than refuses
+agency:max_length                                             0
+agency:required                                               0
+complaint_type:required                                     n/a  the only rule on this column
+descriptor:required                                         n/a  permits rather than refuses
+incident_zip:matches                                          0
+incident_zip:required                                       n/a  permits rather than refuses
+borough:allowed                                               0
+borough:required                                              0
+status:allowed                                                0
+status:required                                               0
+latitude:max                                                  0
+latitude:min                                                  0
+latitude:required                                           n/a  permits rather than refuses
+longitude:max                                                 0
+longitude:min                                                 0
+longitude:required                                          n/a  permits rather than refuses
+closed_after_created:check:ordering                           0
+closed_request_has_a_closed_date:check:requires_when        493
+open_request_has_no_closed_date:check:forbids_when           67
+
+23 constraints, 16 of them removable one at a time
+2 of those 16 are the only thing holding at least one row
+572 held rows over 14 partitions
+```
+
+Take one constraint out of the contract, judge the held rows again, and count what comes
+back. That is a different question from how often a rule fires and it is the one that says
+whether the rule is carrying anything.
+
+Twenty of the twenty three constraints refuse nothing, which was already known. The new part
+is `closed_after_created`. It fires on 12 rows and removing it frees zero of them, because
+all 12 are also open requests carrying a closed date and the `forbids_when` check holds them
+anyway. The arithmetic closes exactly. The three checks fire 493 and 79 and 12 times over 572
+rows. Twelve rows break two rules, and 79 minus 12 is the 67 the second check is the sole
+reason for.
+
+So one of the three rules that has ever refused anything here has never once been the reason
+a row was quarantined. Keeping it is defensible, since it is the rule that would catch a
+closed date before a created date on a row whose status is `Closed`, and this corpus has
+none. Publishing it as one of three working checks without that number is not.
+
+Seven constraints cannot be measured this way and the reason matters. Four are
+`required: false`, which permits rather than refuses, so removing it could not free
+anything. Three are the only rule on their column, and the loader refuses a column carrying
+no constraints, so a contract without them is a shape it would never load. Those print `n/a`
+rather than `0`, because a zero says a rule is carrying nothing and these have not been
+measured at all.
+
+One warning about how to read the table. It removes one constraint at a time and says
+nothing about pairs. Take out both of the checks that score above zero and all 572 rows come
+back, because between them they hold every one. So this measures whether a rule is ever the
+last thing standing. It does not measure what a subset of the contract is worth, and a
+reader who takes the zeroes as permission to delete fourteen constraints would be reading it
+wrong. It is also slow. One full re-validation of the corpus per constraint is 1m40s here
+and there is no incremental version.
+
+## The marts are not left intact, they are rebuilt
+
+```
+python scripts/break_probe.py --mart /tmp/wh.duckdb
+
+  not_allowed    held 1  dbt exit 0  gold over 2 tables CHANGED
+    hash   343:cc8750b24a49 then 343:8c24190fd09a
+    gold says 178742 requests, then 178741, a difference of -1
+  wrong_agency   held 0  dbt exit 0  gold over 2 tables CHANGED
+    hash   343:cc8750b24a49 then 343:3cb1c2dd1f76
+    gold says 178742 requests, then 178742, a difference of 0
+```
+
+I expected the caught break to leave the marts alone and the uncaught one to move them. Both
+move them, and the reason is worth being clear about.
+
+Holding a row does not protect the mart from that row. It removes the row, the marts are
+rebuilt from what is left, and `gold_agency_daily` now says one fewer request happened. That
+is the correct answer to a different question. Nothing in gold distinguishes a day where one
+request was withheld from a day where one fewer request came in, and a consumer reading the
+number has no way to ask.
+
+The uncaught break leaves the total alone at 178,742 and moves one request from one agency
+to another. Same table and the same row count. A different answer, and no trace anywhere.
+
+So the guarantee this project actually offers is narrower than the one a quarantine sounds
+like it offers. Bad values are kept out of the marts. Their effect on the marts is not, and
+the rejection report is the only place it is written down.
+
+## Reading the quarantine back
+
+Held rows were written to disk and nothing read them. `contracts/replay.py` re-judges them.
+
+```
+python scripts/quarantine_partition.py --rejudge
+
+572 held rows re-judged over 14 partitions
+0 would now be accepted
+nothing recovered, which is what an unchanged contract has to say
+```
+
+Zero is the whole point of running it that way. A re-judge against the contract that wrote
+those files has to recover nothing, and a row it did recover would not be evidence about the
+contract. It would be a value that did not survive the trip to disk and back.
+
+The held rows are judged inside their own partition rather than on their own, because
+uniqueness is a property of a set. A row held for a duplicated key and judged alone comes
+back clean. Both copies are held today so the answer would come out right by accident, and
+it would stop being right the first time a policy let one copy through.
+
+Retrying and expiring are not built and are not pending. Retrying means writing rows into
+`accepted.csv` after the load has read it, so a partition ends up with two accepted files
+and no rule saying which one the marts came from. Expiring means deleting data on a timer,
+which is the one operation here nobody could undo. Both need a policy argued somewhere other
+than inside the code that would carry it out.
 
 ## The source is not immutable, and the history table is where that goes
 
@@ -638,7 +904,7 @@ whose attributes were measured changing.
 
 ```
 python tests/run_all.py
-219 passed, 0 failed
+296 passed, 0 failed
 ```
 
 Plain functions named `check_*`, no framework. Nothing in `tests/` needs Airflow or dbt
@@ -685,9 +951,22 @@ The two that survive are constants a check cannot reach. `>` against `>=` while 
 a maximum returns the same maximum, and a yaml line width of 100 or 101 produces the same
 document when no line is that long.
 
-The nine older modules were measured against an earlier tree. `contracts/spec.py`,
-`contracts/profile.py` and `ingest/fetch.py` have changed since and have not been re-run,
-so their share of that 221 is a figure about the code as it was.
+The three modules that were carrying a figure about an older tree have been re-run.
+`contracts/spec.py` killed 37 of 37 and `contracts/profile.py` 9 of 9. `ingest/fetch.py`
+killed 12 of 17 and all five survivors are the constants described below.
+
+The newest three modules were run whole, `warehouse/backfill.py` at 11 of 11,
+`contracts/replay.py` at 17 of 17 and `contracts/breaks.py` at 50 of 50 across two slices.
+The first pass over the last two went 29 of 36 and every survivor was real. Six of them sat
+in the two functions that produce the constraint table above, which had been put in the
+library precisely so a mutant could reach them and then given no test. The other four were
+in the break catalogue itself, where a mutation could flip the value `wrong_agency` writes
+or flip its flag from accepted to held, because every check exercised a break written in the
+test file rather than a shipped one.
+
+The modules changed by that work were re-run too. `contracts/validate.py` 38 of 38,
+`contracts/rules.py` 65 of 65 across two slices, `warehouse/load.py` 21 of 21 and
+`contracts/quarantine.py` 8 of 8.
 
 Three survivors were real and all three are closed. `ingest/compare.py` refused a
 comparison when either side was empty rather than when both were, which would have thrown
@@ -697,10 +976,10 @@ table both are zero, so a refusal reading the wrong one of them was invisible. A
 `verify_partition`'s example cap was never exercised at its default, which is the value the
 load itself gets, because every check named the argument.
 
-The six that survive are all constants. The page size and the HTTP timeout in the fetcher,
-the read block size in the checksum loop, and two JSON indents. Two are equivalent mutants,
-since reading a file in 1 MB or 2 MB blocks produces the same sha256. The rest are values
-no offline check can distinguish, and pinning them would be a test asserting that a number
+The five that survive are all constants in the fetcher. A page size and an HTTP timeout, a
+read block size in the checksum loop, and a JSON indent. Reading a file in 1 MB or 2 MB
+blocks produces the same sha256 and a page size of 50,000 or 50,001 produces the same rows,
+so none of them can change an answer. Pinning them would be a test asserting that a number
 is the number.
 
 One survivor was deleted rather than tested. `warehouse/history` had a query helper taking
@@ -713,8 +992,28 @@ nothing under any input. An argument no caller uses is not a branch missing a te
   partition is bad enough to reject outright is a policy nobody has argued yet, and a
   threshold invented here would be one chosen by looking at the fourteen partitions it
   would judge. The DAG carries a TODO saying so rather than a task that pretends.
-- **Nothing reads the quarantine back.** The held rows are written and no later step
-  re-judges them, retries them, or expires them. A quarantine you never empty is a folder.
+- **The quarantine can be re-judged and not retried or expired.** Held rows never re-enter
+  the accepted file and nothing ages them out. The reasons are in the section on reading the
+  quarantine back and both are policy questions rather than missing code.
+- **A backfill converges the days it is given and cannot remove one it is not.** A partition
+  the source has dropped stays in the table, reconciles cleanly, and keeps feeding the
+  marts. `backfill.orphans` reports them and deliberately deletes nothing.
+- **A backfill over a range is not atomic.** Each partition commits alone, so a failure
+  halfway leaves the earlier ones in and the later ones out. `BackfillStopped` names where
+  it stopped, which makes it resumable by hand and not automatically.
+- **Holding a row changes the marts.** They are rebuilt from what is left, so a withheld row
+  shows up in gold as one fewer request and nothing distinguishes that from a quieter day.
+  The rejection report is the only place the difference is recorded.
+- **No cap on how much of a partition one key collision can take.** A replayed upstream job
+  holds the whole file. The report separates the bystanders from the genuinely bad rows and
+  a threshold on top of that would be a number chosen by looking at this corpus.
+- **The dbt arm of `scripts/break_probe.py` is not covered by any check.** It needs dbt on
+  the machine and a warehouse that is already built, so it sits in the same gap as
+  `scripts/dag_smoke.sh`. It also copies the whole duckdb file, which is fine at this size
+  and would not be later.
+- **`backfill.orphans` reads the table and never the ledger.** A partition in the ledger
+  with no rows behind it is `load.reconcile`'s job. Between them the two states are covered
+  and neither function says so on its own.
 - **Nine of twenty three contract constraints reach dbt and the other fourteen stay in the
   validator.** That is not a gap to close. dbt core has four generic tests and no package is
   installed here, so a range bound or a regex or a two column rule has nowhere to go. The

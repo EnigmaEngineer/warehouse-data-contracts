@@ -124,7 +124,7 @@
       "expected_rows": 10079,
       "bytes": 1539653,
       "sha256": "2d22f55a70b2dd5bb3548a190af208280dec52b159bdd4c7bed749c802ee5212",
-      "fetched_at": "2026-08-31T15:39:38",
+      "fetched_at": "2026-09-01T13:00:50",
       "path": "raw/created_date=2025-01-14.csv"
     }
   ],
