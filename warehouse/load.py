@@ -17,7 +17,8 @@ first load and the tenth are the same statement.
 The load refuses four ways. The header has to be the contract's columns. The report has to
 be about the partition being asked for. The row count in the table afterwards has to match
 the count the report claimed was accepted. And the rows in the table have to be the rows
-that were in the file.
+that were in the file. All four refuse before the commit, and the count check did not until
+a backfill asked what a failure halfway through a range leaves behind.
 
 That last check is the one that earned its place. The first three are all counts and a
 count cannot see a value being rewritten. `read_csv` reads a hive style directory name as
@@ -239,6 +240,16 @@ def load_partition(con, contract, partition, directory, source_sha256, now=None)
             [partition, source_sha256, stamp, path],
         )
         loaded = partition_rows(con, contract, partition)
+        # Inside the transaction, and it was outside it until a backfill went looking for
+        # what a mid range failure leaves behind. A check that raises after the commit is
+        # not one of the ways this function refuses, it is a complaint about a partition
+        # that is already in the table. The other three were always inside.
+        if loaded != expected_rows:
+            raise LoadCountMismatch(
+                "{} loaded {} rows, the report said {} were accepted".format(
+                    partition, loaded, expected_rows
+                )
+            )
         con.execute(
             "insert into {} values (?, ?, ?, ?, ?, ?)".format(ledger),
             [partition, contract.dataset, loaded, rows_held, source_sha256, stamp],
@@ -253,13 +264,6 @@ def load_partition(con, contract, partition, directory, source_sha256, now=None)
     except Exception:
         con.execute("rollback")
         raise
-
-    if loaded != expected_rows:
-        raise LoadCountMismatch(
-            "{} loaded {} rows, the report said {} were accepted".format(
-                partition, loaded, expected_rows
-            )
-        )
 
     return {
         "partition": partition,

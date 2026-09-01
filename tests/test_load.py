@@ -548,6 +548,32 @@ def check_a_count_the_report_disagrees_with_is_refused():
     con.close()
 
 
+def check_a_count_mismatch_rolls_the_partition_back():
+    """The refusal above used to happen after the commit.
+
+    So the rows were in the table and the ledger while the caller was handling an
+    exception saying the load had failed. It is only visible from outside when something
+    asks what the table holds afterwards, which is what a backfill does when it reports
+    where it stopped. Reverting the check to its old place outside the try block leaves
+    the check above green and fails this one.
+    """
+    c = contract()
+    con = opened(c)
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = judged(tmp, "a", BIG, "2025-01-01", accepted=99)
+        try:
+            load.load_partition(con, c, "2025-01-01", directory, "abc123", now=STAMP)
+        except load.LoadCountMismatch:
+            pass
+        else:
+            raise AssertionError("a load disagreeing with its report was accepted")
+        assert load.partition_rows(con, c, "2025-01-01") == 0, "rows survived the refusal"
+        ledger = con.execute("select count(*) from {}.{}".format(
+            schema.RAW_SCHEMA, schema.LEDGER_TABLE)).fetchone()[0]
+        assert ledger == 0, "the ledger recorded a load that was refused"
+    con.close()
+
+
 def check_a_report_saying_nothing_was_held_records_nothing_held():
     c = contract()
     con = opened(c)
