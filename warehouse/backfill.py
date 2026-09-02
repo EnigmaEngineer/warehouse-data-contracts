@@ -43,10 +43,6 @@ class MissingPartitions(ValueError):
         )
 
 
-class EmptyPlan(ValueError):
-    """The range covers nothing. A backfill of no partitions is a caller bug."""
-
-
 class BackfillStopped(RuntimeError):
     """A partition failed. Carries what landed before it, so a resume is possible."""
 
@@ -82,9 +78,6 @@ def plan(judged, start, end):
     listing, which is the whole reason this function exists.
     """
     wanted = days(start, end)
-    if not wanted:
-        raise EmptyPlan("range {} to {} covers no days".format(start, end))
-
     missing = [d for d in wanted if d not in judged]
     if missing:
         raise MissingPartitions(missing)
