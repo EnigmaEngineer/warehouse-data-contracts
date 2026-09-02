@@ -128,7 +128,7 @@ def main():
         print("   committed: {}".format(", ".join(stopped.completed)))
         print("   cause: {}".format(type(stopped.cause).__name__))
     counts = load.partition_counts(con, contract)
-    print("   the table holds {} partitions, and {} is {}".format(
+    print("   the table holds {} partitions and {} is {}".format(
         len(counts), victim,
         "in it" if victim in counts else "absent, so that one rolled back"))
     print("   ledger holds {} rows".format(len(backfill.ledger_rows(con))))
@@ -147,7 +147,7 @@ def main():
     print("   backfilled {} to {} over a source that no longer has {}".format(
         start, days[-2], dropped))
     print("   orphans: {}".format(", ".join(left) or "none"))
-    print("   the table still holds {} rows for it, and the ledger agrees, so "
+    print("   the table still holds {} rows for it and the ledger agrees, so "
           "reconcile is silent".format(load.partition_rows(con, contract, dropped)))
     print("   drift reported by reconcile: {}".format(
         len(load.reconcile(con, contract))))

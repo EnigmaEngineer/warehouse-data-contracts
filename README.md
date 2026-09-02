@@ -807,26 +807,77 @@ alone.
               silver.slv_service_requests            history.snap_service_request
               derived columns, no dedupe             type 2, check strategy
                          |
-              +----------+----------+
-              v                     v
-      silver.dim_complaint_type   gold.gold_agency_daily
-      type 1 and the reason      gold.gold_complaint_resolution
+              +----------+----------------------+
+              v                                  v
+      silver.dim_complaint_type          gold.gold_agency_daily
+      type 1 and the reason
       is measured
+              |
+              +--------> gold.gold_complaint_resolution
+                         joined to the dimension for the agency list
 ```
+
+## Lineage, read out of the models
+
+The picture above is typed. The warehouse half of it is also generated, and the generated
+one is the authority:
+
+```
+source:
+  raw.nyc311_service_requests
+
+level 1:
+  stg_service_requests <- raw.nyc311_service_requests
+
+level 2:
+  slv_service_requests <- stg_service_requests
+  snap_service_request <- stg_service_requests
+
+level 3:
+  dim_complaint_type <- slv_service_requests
+  gold_agency_daily <- slv_service_requests
+
+level 4:
+  gold_complaint_resolution <- dim_complaint_type, slv_service_requests
+```
+
+```
+python scripts/lineage.py --check
+the published lineage matches the models, 6 nodes
+```
+
+`docs/lineage.py` reads `ref()` and `source()` out of the model SQL and sorts the nodes by
+distance from the source. The dbt manifest would be the easier input and it is gitignored,
+so a picture built from it could not be rebuilt from a clone.
+
+Generating it was not a tidiness exercise. The typed diagram had `gold_complaint_resolution`
+sitting beside `gold_agency_daily` as though both hang off silver alone. It joins
+`dim_complaint_type` as well, for the agency list, which puts it a level further down. That
+edge had been missing from the picture for as long as the picture existed. A diagram cannot
+fail a test, so it never came up.
+
+The ingest path in the typed diagram has no generator behind it and stays typed. Contracts
+and quarantines are not a dbt graph and there is nothing to read them out of.
 
 The Airflow side runs end to end. `dags/nyc311_contract_check.py` pulls a partition and
 judges it. Then it writes the split, loads what passed and builds the models:
 
 ```
-bash scripts/dag_smoke.sh 2025-01-13
+WDC_DUCKDB=/tmp/wh.duckdb bash scripts/dag_smoke.sh 2025-01-13
 
-ran 2025-01-13, tasks: pull check load_raw transform
+ran 2025-01-13, tasks: pull check feed_checks load_raw transform
 13049 rows, 13003 accepted, 46 held, 364107 rule evaluations
 raw layer holds 13003 rows for 2025-01-13
-marts: gold.gold_agency_daily 187, gold.gold_complaint_resolution 156,
-       silver.slv_service_requests 178742
+marts: gold.gold_agency_daily 187, gold.gold_complaint_resolution 156, silver.slv_service_requests 178742
 history: 178742 versions over 178742 keys, 0 superseded
 ```
+
+Those mart counts are the whole warehouse and not the partition, so they depend on what was
+in the database before the run. Against a database built by `scripts/load_raw.py` first they
+are 187 and 156 and 178,742. Against an empty one the same command prints 13 and 121 and
+13,003, which is the one partition on its own and is not a failure. The line worth reading
+either way is the rule evaluation count, because that is the only one the run itself
+produced.
 
 Everything after the task list is asked of the database from outside the run. The load task
 already refuses a count it disagrees with and a task returning without raising is not the
@@ -848,8 +899,8 @@ name appears in the log and that the report says how many rules it evaluated.
 ```
 bash scripts/dbt.sh build
 
-Found 5 models, 1 snapshot, 23 data tests, 2 sources
-Done. PASS=29 WARN=0 ERROR=0 SKIP=0 TOTAL=29
+Found 5 models, 1 snapshot, 30 data tests, 3 sources, 471 macros
+Done. PASS=36 WARN=0 ERROR=0 SKIP=0 NO-OP=0 REUSED=0 TOTAL=36
 ```
 
 Staging is a view and everything below it is a table. Staging is a cast and a rename, so
@@ -900,11 +951,125 @@ why. A version history would have told them there was a change, which is false.
 The type 2 table is on the request instead, because that is the only thing in this feed
 whose attributes were measured changing.
 
+## Every refusal, from a command line
+
+```
+python scripts/failing_run.py
+```
+
+A pipeline that refuses is only useful if you can see it refuse. Sixteen exception classes
+are defined across `contracts/`, `warehouse/` and `ingest/`, and this walks eight of them
+against a real partition in a scratch directory:
+
+```
+--- UnjudgedPartition ---
+    load data/raw directly, skipping the contract
+    UnjudgedPartition: data/raw holds no report.json, so nothing has judged what is in it
+
+--- LoadCountMismatch ---
+    load a directory whose report claims one row more than the file has
+    LoadCountMismatch: 2025-01-13 loaded 13003 rows, the report said 13004 were accepted
+
+--- MissingPartitions ---
+    backfill 2025-01-01 to 2025-01-14 with only one day judged
+    MissingPartitions: no judged directory for ['2025-01-01', ...], backfilling around a gap would publish a success with a hole in it
+
+--- ContractError ---
+    load the real contract with the provenance stripped off one rule
+    ContractError: column 'unique_key' is missing 'provenance'
+
+8 of 16 refusals demonstrated
+```
+
+The count on the last line is the reason the file exists. The sixteen come from reading
+`contracts/`, `warehouse/` and `ingest/` for classes that subclass an exception, so a
+refusal added tomorrow appears as undemonstrated rather than being quietly absent. A hand
+written list of failure modes covers what its author remembered.
+
+Each arm names the refusal it expects and fails when it gets a different one. That is not
+defensive coding. It is the defect this file shipped with. The `NothingChecked` arm called
+`profile` with the wrong argument and raised `AttributeError`. The run reported it as
+demonstrated and exited 0, because catching any exception and calling it a refusal is
+exactly how a probe reports a protection that never ran.
+
+Writing it also removed a refusal. `EmptyPlan` could not be reached. `backfill.days`
+refuses a reversed range first and returns at least one day for every other range, so the
+guard behind it had never run and nothing referenced the class. It is deleted rather than
+given a test, because a test for an unreachable branch pins the branch rather than the
+behaviour.
+
+## The README's own transcripts are checked
+
+```
+python scripts/readme_check.py
+51 fenced blocks, 32 of them transcripts
+30 run a script in this repo, 2 run something else
+180 output lines, 58 graded against a print in the source
+no drift, 58 graded lines all match
+```
+
+A block that shows a command and then its output is a claim about what the program prints,
+and nothing was checking it. `docs/blocks.py` reads the print statements out of the named
+script with `ast`, turns them into patterns and grades each published line against them.
+
+Read the counts before the verdict. It grades 58 of 180 lines, which is under a third.
+The rest are table rows and data, formatted through templates like `{:<12} {:>8}` that have
+almost no fixed text in them and could only be graded by re-running the command. A pass over
+58 lines is not a pass over the document and the count is printed so nobody reads it as one.
+
+The two ungradable blocks are the mutation commands, because `mutate.py` is not in this
+repo. Naming them beats silently skipping them, which is how a checker ends up reporting a
+clean run over nothing.
+
+It found three stale lines on the day it was written. Two had lost a comma in a prose edit
+and no longer matched the script that prints them. The third said the DAG runs four tasks
+and it has run five since the freshness checks landed.
+
+### What it catches, measured rather than asserted
+
+A check found by pointing it at three lines you already knew were stale proves very little.
+The threshold was chosen so those three came out above it, which is fitting a number to the
+cases in front of you. So the arm that can fail:
+
+```
+python scripts/readme_check.py --holdout
+207 damaged lines, 173 caught
+32 landed inside an argument, so the damaged line is still printable
+175 detectable, 173 caught, rate 0.989
+   missed, word dropped: 179314 rows 14 partitions
+   missed, word changed: 179314 rows elsewhere 14 partitions
+```
+
+Every line the check currently passes is broken four ways. A comma removed. A word dropped.
+A word changed. A word inserted. Read the second line of that output carefully, because it
+is the honest part.
+Thirty two of the damages land where a value goes, so the broken line is still something the
+program can print with different arguments. Counting those as misses would be asking the
+check to know what a number should be, and it cannot. That is the job of the thread about
+figures having a script behind them, not this one.
+
+Of the 175 damages that leave a line the program cannot produce, it catches 173. Both misses
+are the same line, `179314 rows over 14 partitions`, whose template has three fixed words.
+That is under the floor for recognising a line, so a badly enough damaged copy is claimed by
+nothing and passes as unrecognised rather than as wrong.
+
+### How the rule was arrived at
+
+The grading rule took three attempts and the first two failed the same way. Both decided
+whether a line belonged to a template by reading the template's text, so neither could claim
+a line whose drift was in that text. The lines most worth grading were the ones they skipped
+as unrecognised. Claiming is by shared vocabulary now, and the full pattern decides.
+
+The block above is itself a transcript, so the checker grades its own output. It cannot
+check those four numbers, because a number in a template is an argument and matches
+anything. It checks that the sentences are still the sentences it prints. Publishing them
+here also moved them, since three new blocks went in with these sections.
+
 ## Running the checks
 
 ```
 python tests/run_all.py
-296 passed, 0 failed
+317 passed, 0 failed
 ```
 
 Plain functions named `check_*`, no framework. Nothing in `tests/` needs Airflow or dbt
@@ -912,11 +1077,13 @@ installed. `tests/test_dbt_project.py` reads the dbt project rather than running
 `scripts/dbt.sh build` is the real check. The DAG is the other gap and
 `scripts/dag_smoke.sh` is that one.
 
-A mutation pass over the eleven library modules, with the control clean before and after
-every call. The two newest modules were run today and killed 59 of 61:
+A mutation pass over the library modules, with the control clean before and after every
+call. `mutate.py` is a small harness I keep outside this repo. It rewrites one AST node at
+a time and uses `tests/run_all.py` as the oracle, so any mutation tool pointed at the same
+suite reproduces these counts.
 
 ```
-python ../portfolio-program/scripts/mutate.py --repo . \
+python mutate.py --repo . \
   --module contracts/rules.py --module contracts/spec.py \
   --module contracts/profile.py --module contracts/validate.py \
   --module contracts/quarantine.py --module ingest/fetch.py \
@@ -925,12 +1092,12 @@ python ../portfolio-program/scripts/mutate.py --repo . \
 
 221 killed, 6 survived
 
-python ../portfolio-program/scripts/mutate.py --repo . --module contracts/generate.py
+python mutate.py --repo . --module contracts/generate.py
 17 killed, 1 survived
 
-python ../portfolio-program/scripts/mutate.py --repo . \
+python mutate.py --repo . \
   --module contracts/feed.py --slice 0:22
-python ../portfolio-program/scripts/mutate.py --repo . \
+python mutate.py --repo . \
   --module contracts/feed.py --slice 22:43
 42 killed, 1 survived
 ```
@@ -950,6 +1117,41 @@ default `k` beside it. Fixed, then re-run to 42 of 43.
 The two that survive are constants a check cannot reach. `>` against `>=` while scanning for
 a maximum returns the same maximum and a yaml line width of 100 or 101 produces the same
 document when no line is that long.
+
+The two modules under `docs/` were run last and killed 67 of 71:
+
+```
+python mutate.py --repo . \
+  --module docs/blocks.py --slice 0:26
+python mutate.py --repo . \
+  --module docs/blocks.py --slice 26:51
+49 killed, 1 survived
+
+python mutate.py --repo . --module docs/lineage.py
+18 killed, 3 survived
+```
+
+The first pass over `docs/blocks.py` went 43 of 53 and six survivors were real. Every
+threshold in the module survived, because the fixtures sat well clear of each one rather
+than either side of it. The block start line and the shell template line number were never
+asserted, so both could be off by one. And no fixture used an f-string, so the branch that
+reads one had never run.
+
+Two of the ten wanted deleting rather than testing. One was a `lineno` default that no
+parsed node ever reaches. The other asserted that a piece of an f-string is a string when
+the line above had already established it is a `Constant`, and inside an f-string a
+`Constant` is always a string.
+
+The one that survives is `or` against `and` in the filter that skips a command's flags and
+environment assignments. Telling them apart needs a word that starts with a dash, carries no
+equals sign and ends in `.py`. No command in this README looks like that, so the two read
+the same here and the difference is untested rather than absent.
+
+The three in `docs/lineage.py` are the depth arithmetic and they are equivalent, measured
+rather than argued. `render` groups the nodes and then numbers the groups with `enumerate`,
+so the depths themselves are thrown away and only the grouping survives. Shifting the base
+from 0 to 1, doubling the step, and changing the default for a node with no parents all
+produce a byte identical diagram.
 
 The three modules that were carrying a figure about an older tree have been re-run.
 `contracts/spec.py` killed 37 of 37 and `contracts/profile.py` 9 of 9. `ingest/fetch.py`
