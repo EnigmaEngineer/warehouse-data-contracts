@@ -1,4 +1,4 @@
-# warehouse-data-contracts
+# Warehouse Data Contracts
 
 An Airflow and dbt pipeline that refuses to publish data breaking its contract. Contracts
 are YAML, they carry the provenance of every rule, and they generate both the ingestion
