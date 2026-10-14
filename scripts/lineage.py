@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the warehouse lineage, or check the README's copy of it.
+"""Print the warehouse lineage, or check the published copy of it.
 
     python scripts/lineage.py
     python scripts/lineage.py --check
@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from docs import lineage
+from docs import lineage, published
 
 MARKER = "## Lineage, read out of the models"
 
@@ -19,9 +19,10 @@ MARKER = "## Lineage, read out of the models"
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", default="dbt")
-    parser.add_argument("--doc", default="README.md")
+    parser.add_argument("--doc", default=None,
+                        help="one file to check. Default is every published doc")
     parser.add_argument("--check", action="store_true",
-                        help="compare the README block against the models and exit 1 on a difference")
+                        help="compare the published block against the models and exit 1 on a difference")
     args = parser.parse_args()
 
     graph = lineage.nodes(args.project)
@@ -31,11 +32,14 @@ def main():
         print(drawn)
         return 0
 
-    with open(args.doc, encoding="utf-8") as handle:
-        text = handle.read()
+    if args.doc is None:
+        text = published.read(".")
+    else:
+        with open(args.doc, encoding="utf-8") as handle:
+            text = handle.read()
     block = lineage.published(text, MARKER)
     if block is None:
-        print("no block under '{}' in {}".format(MARKER, args.doc))
+        print("no block under '{}' in {}".format(MARKER, args.doc or "the published docs"))
         return 1
     if block == drawn:
         print("the published lineage matches the models, {} nodes".format(len(graph)))

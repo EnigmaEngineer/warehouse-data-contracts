@@ -1,0 +1,1130 @@
+# Design notes
+
+Moved out of the README so the front page stays short. Back to the [README](../README.md).
+
+## 584 is not a number of rows and neither is 493
+
+That last line used to read "584 rows". It is a sum over three checks and a row breaking
+two of them is in it twice, so it is an upper bound that reads like a count.
+
+The other tempting number is the largest single count, 493. It is a lower bound and it
+reads like a count too. Both are one line of arithmetic away from a per rule table and
+neither is the answer to the only question a quarantine has, which is which rows to move.
+
+`contracts/validate.py` judges row by row and carries the row identity, so it can just say:
+
+```
+python scripts/quarantine_partition.py
+
+partition        rows   accept     held     sum   worst      evals
+2025-01-01      10873    10841       32      32      26     303318
+2025-01-02      13811    13777       34      34      27     385293
+...
+2025-01-14      10079    10046       33      33      30     281048
+
+179314 rows over 14 partitions
+held        572 rows, 0.00319 of the corpus
+sum of the per rule counts 584, which is 12 more than the rows held
+12 held rows broke more than one rule
+```
+
+572. The upper bound was over by 12 and the lower bound was under by 79, which is 13.8
+percent of the answer.
+
+The 12 are not a rounding artefact and they are the same 12 rows every time. Every request
+closed before it was created is also a request still marked in flight while carrying a
+closing date. One broken date field, showing up under two rules:
+
+```
+('closed_after_created:check:ordering',
+ 'open_request_has_no_closed_date:check:forbids_when')  12
+```
+
+So the two views of one contract are kept as two summaries of one implementation.
+`rules.value_rules` returns the predicates and `rules.judge_check` judges one row against
+one cross column check and both the column view and the row view read them.
+`tests/test_validate.py` grades the two against each other on a fixture built so they have
+something to disagree about, because two implementations of one rule can both be correct
+and still not match.
+
+## Quarantine
+
+```
+data/quarantine/created_date=2025-01-14/
+  accepted.csv        10046 rows, the original columns
+  quarantined.csv        33 rows, plus _contract_failures
+  report.json
+```
+
+The held rows keep every column they arrived with and gain one naming each rule they
+broke, `closed_request_has_a_closed_date:check:requires_when` and so on. A rejection report
+that gives a count is a report nobody can act on.
+
+What is deliberately not here is a threshold that fails a whole partition once too much of
+it is bad. Splitting the rows is a fact about the data. What share is too much is a policy,
+and any number set today would be one picked by looking at the fourteen partitions it is
+about to judge.
+
+## The raw layer is all text and three rows are the reason
+
+Everything the load writes is `VARCHAR`. That is a decision and this is the measurement
+behind it.
+
+Let duckdb read a partition without telling it anything and it types the columns for you.
+Run that over all fourteen and one column comes back two different ways:
+
+```
+python scripts/sniff_probe.py
+
+14 files, 11 columns, 1 where the guess is not stable
+  incident_zip   BIGINT    11 files
+    2025-01-01, 2025-01-02, 2025-01-03, 2025-01-04, 2025-01-05, 2025-01-06,
+    2025-01-07, 2025-01-09, 2025-01-10, 2025-01-11, 2025-01-13
+  incident_zip   VARCHAR   3 files
+    2025-01-08, 2025-01-12, 2025-01-14
+```
+
+Three partitions out of fourteen. The cause is one row each. `07307` and `00083` and
+`07105` are the only zips in 179,314 rows that start with a zero. A leading zero
+disqualifies an integer, so three rows decide the type of a column in the warehouse.
+
+**The dangerous path is the one that looks safe.** Reading all fourteen at once refuses:
+
+```
+reading all 14 at once:
+  refused, Invalid Input Error: Schema mismatch between globbed files.
+```
+
+Reading them one at a time and appending, which is exactly what a daily DAG does, does
+not refuse. The first partition to arrive decides the schema and every later one is cast
+into it without complaint:
+
+```
+first partition decides the schema, the rest are appended into it:
+  typed from created_date=2025-01-01.csv
+  179314 rows, 1972454 cells
+  closed_date        178013 cells differ from the text they arrived as
+  created_date       179314 cells differ from the text they arrived as
+  incident_zip            3 cells differ from the text they arrived as
+  longitude               2 cells differ from the text they arrived as
+```
+
+The timestamp columns are the loud number and the least interesting one.
+`2025-01-01T00:51:02.000` becomes `2025-01-01 00:51:02`, which is a different string
+carrying the same instant. `-74` becoming `-74.0` is the same kind of thing twice.
+
+The three zips are not that. `cast('00083' as bigint)` is `83`. The contract says
+`incident_zip` matches `^[0-9]{5}$`, the ingestion check reads the text off the file and
+passes it and the same rule run against the table would refuse it. One clause, two
+answers and neither layer is wrong on its own.
+
+Load the partitions in the other order and the damage is zero, because the first file then
+types the column as text. A defect whose existence depends on which day the backfill
+started is not one anybody finds by reading the code.
+
+So `warehouse/schema.py` builds the `columns=` argument from the contract and hands it to
+`read_csv` every time. Nothing in the load path infers anything. Casting is a decision that
+belongs downstream in dbt, where somebody can argue with it.
+
+## The explicit types did not help and here is what they missed
+
+The section above is the defence against a reader guessing. It was not enough and what
+got past it is worse than what it stopped.
+
+The quarantine writes each partition into a directory named for it,
+`data/quarantine/created_date=2025-01-01/`. That is hive layout, `read_csv` recognises it,
+and it reads the directory name as a column. When the file already has a column of that
+name, the one off the path wins.
+
+```
+same file, read three ways
+
+read_csv(path)                                   created_date = 2025-01-01      DATE
+read_csv(path, columns={... 'created_date': 'VARCHAR' ...})
+                                                 created_date = 2025-01-01      DATE
+read_csv(path, hive_partitioning=false, columns={...})
+                                                 created_date = 2025-01-01T00:51:02.000
+```
+
+The middle line is the one that matters. An explicit `columns=` naming the type does not
+stop it. The path derived column overrides the declared type as well as the value, so the
+defence built against the type inference problem did not cover the column it mattered most
+for.
+
+**Every check in the load passed.** The row count matched what the contract's report said
+it accepted, on all fourteen partitions. The ledger reconciled. Loading twice produced a
+byte identical fingerprint, because both loads were wrong the same way. Nothing anywhere
+compared a value in the table against the same value in the file.
+
+The damage was one column, on every row of it:
+
+```
+178742 rows, 1966162 cells
+  created_date   178742 cells differ from the cell in the file
+```
+
+Times of day gone. `2025-01-01T00:51:02.000` became `2025-01-01` on all 178,742 rows. The
+value it became is the partition it lives in, so the table reads exactly as a person
+expects a daily table to read.
+
+**The contract passes on the file and fails on the table**, which is the same sentence as
+the leading zero problem two sections up, at four orders of magnitude more rows. The
+contract types `created_date` as a timestamp. `as_timestamp` on the value that arrived
+returns an instant. On the value the warehouse stored it returns nothing, because
+`2025-01-01` matches none of the formats the publisher writes.
+
+What caught it was the staging model refusing to cast. `try_strptime` with the publisher's
+own format returned null on all 178,742 rows and `stg_cast_is_lossless` failed. A plain
+`cast(created_date as timestamp)` would have accepted `2025-01-01` and produced midnight,
+silently and the marts would have looked fine. This is what that costs:
+
+```
+resolution hours over 177,934 closed requests
+
+created at the real time     median 11.57   p90 277.62   mean 204.30
+created at midnight          median 28.28   p90 293.05   mean 217.36
+```
+
+The median is out by 144 percent and the mean by 6.4. A dashboard watching the average
+would have shown nothing at all.
+
+So the load now passes `hive_partitioning=false`. And `warehouse/load.verify_partition`
+reads the file with the standard library and the table with SQL, then compares the two. It
+is the only check here that is not a count and a count is exactly what this defect
+satisfies.
+
+```
+python scripts/load_raw.py --twice
+
+178742 rows over 14 partitions, 0 replaced
+fingerprint 178742:2213f6d310b3
+
+second pass 178742 rows, 178742 replaced
+fingerprint 178742:2213f6d310b3
+identical
+```
+
+That fingerprint is not the one this file used to publish. The row count did not move and
+the contents did.
+
+## Loading a partition twice costs nothing
+
+```
+python scripts/load_raw.py --twice
+
+2025-01-01      10841 loaded        0 replaced     32 held
+...
+2025-01-14      10046 loaded        0 replaced     33 held
+
+178742 rows over 14 partitions, 0 replaced
+fingerprint 178742:2213f6d310b3
+
+second pass 178742 rows, 178742 replaced
+fingerprint 178742:2213f6d310b3
+identical
+ledger agrees with the table on all 14 partitions
+```
+
+Delete then insert on the partition key, inside one transaction. Not an append, because a
+warehouse where a rerun doubles a day is a warehouse nobody dares backfill. The delete runs
+whether or not the partition is there, so the first load and the tenth are the same
+statement.
+
+The fingerprint covers every source column plus the partition and the source checksum. It
+leaves out `_loaded_at`, which is wall clock and would make any two loads look different
+for a reason nobody cares about.
+
+`raw.load_ledger` carries one row per load. It is not the truth about what is in the table,
+it is what a load claimed and `warehouse/load.reconcile` is the thing that compares the
+two. A check that has never fired is still worth having when the alternative is trusting
+the writer to be honest about itself.
+
+`load_partition` takes a quarantine directory rather than a CSV path and that is the one
+design decision in the module worth arguing about. A function taking a file would happily
+be handed `data/raw`, all 13,049 rows of it including the 46 the contract refused and the
+only thing between that and the warehouse would be every caller remembering not to. A
+directory with no `report.json` is refused and `data/raw` has none:
+
+```
+load.load_partition(con, contract, "2025-01-13", "data/raw", sha)
+UnjudgedPartition: data/raw holds no report.json, so nothing has judged what is in it
+```
+
+The counts come out of that report rather than from the caller, so there is no argument to
+get wrong and no default to leave at zero.
+
+Five refusals in total. `UnjudgedPartition` for a directory nobody judged.
+`WrongPartition` when the report is about a different day. `HeaderMismatch` when the
+columns are not the contract's. `LoadCountMismatch` when the table ends up holding a
+different number of rows than the report said it accepted. And `ContentMismatch` when the
+rows in the table are not the rows in the file.
+
+The first four are counts and the fifth is not. That distinction is the whole content of
+the section above.
+
+`LoadCountMismatch` used to be raised after the commit. The rows were already in the table
+and the ledger while the caller was handling an exception saying the load had failed. Every
+check in the suite still passed, because they all asked whether the refusal happened rather
+than what the table held afterwards. It surfaced while writing the backfill below, which is
+the first thing here that asks what a failure leaves behind.
+
+## A backfill is a range and a directory listing is not one
+
+```
+python scripts/backfill_probe.py
+```
+
+Reloading one partition is safe. Reloading a range brings three problems that a single load
+does not have and the probe measures all three.
+
+**A rerun changes nothing.**
+
+```
+pass one   178742 loaded, 0 replaced, fingerprint 178742:2213f6d310b3
+pass two   178742 loaded, 178742 replaced, fingerprint 178742:2213f6d310b3
+identical
+ledger rows after two passes: 14
+```
+
+The second pass reports every row as replaced rather than as new, which is what says the
+delete ran. Fourteen ledger rows after two passes rather than twenty eight, because the
+ledger row is deleted with the partition.
+
+**A gap is refused rather than skipped.**
+
+```
+refused, naming ['2025-01-08']
+a loop over the directory listing would have loaded 13 days and printed a success
+```
+
+`backfill.plan` takes a start and an end, expands the range day by day and refuses when a
+day inside it has not been judged. Iterating whatever directories happen to exist gives a
+success with a hole in it and the hole is found weeks later by an analyst.
+
+**A range is not one transaction.**
+
+```
+stopped at 2025-01-07 after 6 partitions
+committed: 2025-01-01, 2025-01-02, 2025-01-03, 2025-01-04, 2025-01-05, 2025-01-06
+cause: LoadCountMismatch
+the table holds 6 partitions and 2025-01-07 is absent, so that one rolled back
+```
+
+Each partition commits on its own. Wrapping the loop in one transaction would hold every
+delete open until the last insert, so a long backfill becomes one long lock with nothing
+recoverable in it. The shape stays and `BackfillStopped` carries the list of partitions that
+did land. Knowing a backfill failed is not enough to resume it. Knowing where it stopped is.
+
+**And a rerun cannot remove.**
+
+```
+backfilled 2025-01-01 to 2025-01-13 over a source that no longer has 2025-01-14
+orphans: 2025-01-14
+the table still holds 10046 rows for it and the ledger agrees, so reconcile is silent
+drift reported by reconcile: 0
+```
+
+This is the one that surprised me. Delete then insert converges each partition on its
+source and it can never touch a day the range was not given. A partition the source has
+dropped sits in the table forever, feeding the marts, reconciling cleanly against a ledger
+that agrees with it. `backfill.orphans` finds them and does nothing else. Deleting on the
+strength of an absent directory would empty the warehouse the first day a fetch comes back
+short, which is a far more likely event than a publisher withdrawing a day.
+
+## Every rule, broken on purpose, with a control
+
+```
+python scripts/break_probe.py
+
+partition 2025-01-06 holds 14141 rows, 14086 of them clean
+
+break                  rule expected to catch it                            wrote held  amp named  control
+required_null          agency:required                                          1    1  1.0 yes    clean
+not_allowed            borough:allowed                                          1    1  1.0 yes    clean
+too_long               agency:max_length                                        1    1  1.0 yes    clean
+bad_pattern            incident_zip:matches                                     1    1  1.0 yes    clean
+out_of_range           latitude:max                                             1    1  1.0 yes    clean
+not_a_number           longitude:type:number                                    1    1  1.0 yes    clean
+duplicate_key          unique_key:unique                                        1    2  2.0 yes    clean
+closed_before_created  closed_after_created:check:ordering                      1    1  1.0 yes    clean
+closed_with_no_date    closed_request_has_a_closed_date:check:requires_when     1    1  1.0 yes    clean
+open_with_a_date       open_request_has_no_closed_date:check:forbids_when       1    1  1.0 yes    clean
+wrong_agency           none, nothing reads it                                   1    0  0.0 yes    n/a
+
+11 of 11 breaks behaved as named
+```
+
+A demonstration that a rule refuses something is nearly worthless on its own, because a
+refusal can come from two other places. The row might have been bad before anything touched
+it. Or a different rule might catch the same damage, in which case deleting the rule under
+test would change nothing at all.
+
+So each break does two things a demonstration usually skips. Targets are chosen from the
+rows the contract currently accepts, which is why the clean count is printed first. And the
+`control` column is a second judgement of the same damaged rows against a contract with
+exactly that one rule removed. A break whose control still says held is not testing the rule
+its name claims.
+
+`not_a_number` is the odd one. Every other rule has a key in the YAML that can be deleted,
+and `type` does not. It is implied by the column existing. Its control has to remove the
+whole column and `drop_column` refuses to do that for a column any cross column check
+reads, because that would relax two rules and the break would then prove less than it says.
+
+`wrong_agency` is in the table to get through. It writes a real agency acronym into the
+wrong row. `required` passes, `max_length` passes, the type passes. The contract constrains
+the shape of that value and has nothing to say about whether it is true.
+
+## One replayed job holds a whole partition and 110 rows were the bad ones
+
+Both copies of a duplicated key are held. That is right, because the contract says the value
+identifies one request and never says which copy is real, so letting one through would be
+picking by file order. What was missing was a number.
+
+```
+the partition replayed once:
+  28282 rows in, 28282 held, 1.0000 of the file
+  28172 of those are held only by a key collision
+  largest group sharing one key is 2
+  on the untouched partition it is 1 and 0 held only by a collision
+```
+
+One upstream job replayed and the quarantine takes the entire partition. Of the 28,282
+rows held, 110 are the 55 genuinely bad rows in two copies. The other 28,172 have nothing
+wrong with them beyond existing twice.
+
+A single held count cannot tell those apart, so `report.json` now carries two more fields.
+`held_only_by_a_key_collision` counts the rows whose every failure is a uniqueness one.
+`largest_key_collision` is the size of the biggest group sharing a value, which is one on a
+clean partition and has no ceiling. Both are zero and one on all fourteen real partitions,
+because `unique_key` has never collided here and that is exactly why the branch needed a
+break to exercise it.
+
+There is still no cap. A cap is a policy and picking one today would mean picking it off the
+fourteen partitions it would judge.
+
+## Two of sixteen constraints are the only reason anything is held
+
+```
+python scripts/quarantine_partition.py --marginal
+
+constraint                                           sole reason
+unique_key:required                                           0
+unique_key:unique                                             0
+created_date:required                                       n/a  the only rule on this column
+closed_date:required                                        n/a  permits rather than refuses
+agency:max_length                                             0
+agency:required                                               0
+complaint_type:required                                     n/a  the only rule on this column
+descriptor:required                                         n/a  permits rather than refuses
+incident_zip:matches                                          0
+incident_zip:required                                       n/a  permits rather than refuses
+borough:allowed                                               0
+borough:required                                              0
+status:allowed                                                0
+status:required                                               0
+latitude:max                                                  0
+latitude:min                                                  0
+latitude:required                                           n/a  permits rather than refuses
+longitude:max                                                 0
+longitude:min                                                 0
+longitude:required                                          n/a  permits rather than refuses
+closed_after_created:check:ordering                           0
+closed_request_has_a_closed_date:check:requires_when        493
+open_request_has_no_closed_date:check:forbids_when           67
+
+23 constraints, 16 of them removable one at a time
+2 of those 16 are the only thing holding at least one row
+572 held rows over 14 partitions
+```
+
+Take one constraint out of the contract, judge the held rows again and count what comes
+back. That is a different question from how often a rule fires and it is the one that says
+whether the rule is carrying anything.
+
+Twenty of the twenty three constraints refuse nothing, which was already known. The new part
+is `closed_after_created`. It fires on 12 rows and removing it frees zero of them, because
+all 12 are also open requests carrying a closed date and the `forbids_when` check holds them
+anyway. The arithmetic closes exactly. The three checks fire 493 and 79 and 12 times over 572
+rows. Twelve rows break two rules and 79 minus 12 is the 67 the second check is the sole
+reason for.
+
+So one of the three rules that has ever refused anything here has never once been the reason
+a row was quarantined. Keeping it is defensible, since it is the rule that would catch a
+closed date before a created date on a row whose status is `Closed` and this corpus has
+none. Publishing it as one of three working checks without that number is not.
+
+Seven constraints cannot be measured this way and the reason matters. Four are
+`required: false`, which permits rather than refuses, so removing it could not free
+anything. Three are the only rule on their column and the loader refuses a column carrying
+no constraints, so a contract without them is a shape it would never load. Those print `n/a`
+rather than `0`, because a zero says a rule is carrying nothing and these have not been
+measured at all.
+
+One warning about how to read the table. It removes one constraint at a time and says
+nothing about pairs. Take out both of the checks that score above zero and all 572 rows come
+back, because between them they hold every one. So this measures whether a rule is ever the
+last thing standing. It does not measure what a subset of the contract is worth and a
+reader who takes the zeroes as permission to delete fourteen constraints would be reading it
+wrong. It is also slow. One full re-validation of the corpus per constraint is 1m40s here
+and there is no incremental version.
+
+## The marts are not left intact, they are rebuilt
+
+```
+python scripts/break_probe.py --mart /tmp/wh.duckdb
+
+  not_allowed    held 1  dbt exit 0  gold over 2 tables CHANGED
+    hash   343:cc8750b24a49 then 343:8c24190fd09a
+    gold says 178742 requests, then 178741, a difference of -1
+  wrong_agency   held 0  dbt exit 0  gold over 2 tables CHANGED
+    hash   343:cc8750b24a49 then 343:3cb1c2dd1f76
+    gold says 178742 requests, then 178742, a difference of 0
+```
+
+I expected the caught break to leave the marts alone and the uncaught one to move them. Both
+move them and the reason is worth being clear about.
+
+Holding a row does not protect the mart from that row. It removes the row, the marts are
+rebuilt from what is left and `gold_agency_daily` now says one fewer request happened. That
+is the correct answer to a different question. Nothing in gold distinguishes a day where one
+request was withheld from a day where one fewer request came in and a consumer reading the
+number has no way to ask.
+
+The uncaught break leaves the total alone at 178,742 and moves one request from one agency
+to another. Same table and the same row count. A different answer and no trace anywhere.
+
+So the guarantee this project actually offers is narrower than the one a quarantine sounds
+like it offers. Bad values are kept out of the marts. Their effect on the marts is not and
+the rejection report is the only place it is written down.
+
+## Reading the quarantine back
+
+Held rows were written to disk and nothing read them. `contracts/replay.py` re-judges them.
+
+```
+python scripts/quarantine_partition.py --rejudge
+
+572 held rows re-judged over 14 partitions
+0 would now be accepted
+nothing recovered, which is what an unchanged contract has to say
+```
+
+Zero is the whole point of running it that way. A re-judge against the contract that wrote
+those files has to recover nothing and a row it did recover would not be evidence about the
+contract. It would be a value that did not survive the trip to disk and back.
+
+The held rows are judged inside their own partition rather than on their own, because
+uniqueness is a property of a set. A row held for a duplicated key and judged alone comes
+back clean. Both copies are held today so the answer would come out right by accident and
+it would stop being right the first time a policy let one copy through.
+
+Retrying and expiring are not built and are not pending. Retrying means writing rows into
+`accepted.csv` after the load has read it, so a partition ends up with two accepted files
+and no rule saying which one the marts came from. Expiring means deleting data on a timer,
+which is the one operation here nobody could undo. Both need a policy argued somewhere other
+than inside the code that would carry it out.
+
+## The source is not immutable and the history table is where that goes
+
+Fetch the same fourteen days again three days after the first extract and four rows out of
+179,314 come back different. Nothing was added and nothing was removed. Every partition
+returned exactly the row count it returned before, so the completeness guard in
+`ingest/fetch.py` is satisfied by all fourteen. That guard asks the API for its own
+`count(1)`. Three of the fourteen checksums moved.
+
+```
+python scripts/refetch_probe.py --into /tmp/second --write
+
+2025-01-01  rows  10873  changed rows   2  cells   2  added  0  removed  0  sha same False
+2025-01-03  rows  11684  changed rows   1  cells   2  added  0  removed  0  sha same False
+2025-01-09  rows  14906  changed rows   1  cells   2  added  0  removed  0  sha same False
+
+14 partitions, 179314 rows
+3 partitions changed
+4 rows changed, 6 cells
+columns that moved: {'closed_date': 4, 'status': 2}
+```
+
+Two shapes and they are not the same problem.
+
+```
+2025-01-01 63591237 closed_date: '2025-01-03T12:29:42.000' -> '2026-08-28T14:27:34.000'
+2025-01-01 63592286 closed_date: '2025-01-03T12:30:25.000' -> '2026-08-28T14:27:34.000'
+2025-01-03 63618281 closed_date: '' -> '2026-08-27T14:56:33.000'
+                    status:      'In Progress' -> 'Closed'
+2025-01-09 63704984 closed_date: '' -> '2026-08-28T13:48:00.000'
+                    status:      'Assigned' -> 'Closed'
+```
+
+The first two are DOT sidewalk complaints that closed in January 2025 and had their closing
+time rewritten nineteen months later, both to the same instant, so one operation touched
+both. That is a correction to a historical fact. The other two are requests that were still
+in flight and have now finished, which is the workflow arriving very late.
+
+**The contract cannot see any of it.** Every one of those rows satisfies the contract before
+and after. `open_request_has_no_closed_date` is happy with `In Progress` and no closing
+date and `closed_request_has_a_closed_date` is happy with `Closed` and one. A contract
+judges a partition against a rule and the thing that changed here is the partition against
+itself.
+
+**Nor can the raw layer.** The load is delete then insert on the partition key, which is
+what makes a backfill safe and it is also what destroys the previous value. Reload those
+three partitions and the row counts are identical, the ledger reconciles and the old
+closing dates are gone with nothing recording that they existed.
+
+So `snapshots/snap_service_request.sql` is a dbt snapshot on the `check` strategy over
+`status` and `closed_at`. The source has no `updated_at` column, so a timestamp strategy
+has nothing to read.
+
+```
+python scripts/scd2_probe.py --db /tmp/wh.duckdb
+
+first extract
+  178742 versions over 178742 keys, 178742 current, 0 superseded
+
+second extract, 3 of 14 partitions changed
+  2025-01-01  10841 loaded, 10841 replaced, 119251 cells checked
+  2025-01-03  11643 loaded, 11643 replaced, 128073 cells checked
+  2025-01-09  14827 loaded, 14827 replaced, 163097 cells checked
+  178746 versions over 178742 keys, 178742 current, 4 superseded
+
+keys carrying history: 4
+  63618281  status In Progress  closed_at None                 valid_to 2026-08-30 ...
+  63618281  status Closed       closed_at 2026-08-27 14:56:33  valid_to None
+
+raw fingerprint after the second load: 178742:a83cd8566c8a
+```
+
+Four superseded rows out of 178,746. That is the whole yield and it is the honest size of
+it. The point is not the four. It is that the raw table's fingerprint moved while its row
+count did not and without the snapshot there would be no record anywhere that anything
+had happened.
+
+The second extract is replayed from `data/extract_diff.json` rather than fetched. That file
+is committed and the raw partitions are not, because the live source keeps moving and
+nobody can fetch the extract measured here, including a later run of this repo.
+`ingest/compare.apply_diff` refuses to replay onto an input whose values have already
+moved, so a replay against the wrong file fails rather than producing a plausible one.
+
+## Provenance is a field on every rule
+
+```yaml
+  - name: borough
+    type: string
+    provenance: asserted
+    note: "the publisher never enumerates these. list taken from the five boroughs"
+    required: true
+    allowed: [BRONX, BROOKLYN, MANHATTAN, QUEENS, STATEN ISLAND, Unspecified]
+```
+
+`documented` means the publisher says so, in a column description or a declared type.
+`asserted` means I decided it and the source never promised it. `contracts/spec.py` refuses
+to load a rule that carries neither.
+
+The split exists because a contract written by profiling the data cannot be violated by the
+data. It describes what is there. Writing this one from the publisher's column metadata
+first, before looking at a single value, is the only reason the zero above means anything.
+It also means the thirteen asserted rules were thirteen chances to be wrong and none of
+them was, which is a stronger statement than a passing test.
+
+Worth knowing about the documented half: the publisher's metadata gives a type and a
+sentence of prose per column and nothing else. No nullability and no ranges. No
+vocabularies and no freshness commitment. Seven of the twenty constraints could be sourced
+from it. A data contract is a thing the consumer asserts and the format should make that
+visible rather than let it hide behind a schema.
+
+## The first version of this reported zero because it checked nothing
+
+The clean result arrived before the cross column checks existed and it was wrong. The
+profiler worked out which contracted columns were absent from a partition by comparing
+`Column` objects against header strings:
+
+```python
+missing = [c.name for c in contract.columns if c not in present]
+```
+
+Every column read as absent. Every rule was skipped. The report printed zero violations over
+179,314 rows and nothing in the output said it had evaluated nothing at all.
+
+The tell was that it was too good. A contract with thirteen guesses in it, matching real
+municipal data perfectly, is not a contract that passed.
+
+Two things changed. `contracts/profile.py` raises `NothingChecked` when no contracted column
+is present in a partition that has rows and `scripts/profile_source.py` prints the number
+of rule evaluations beside the result. A report that can say "clean" without saying how much
+it looked at will eventually say "clean" having looked at nothing.
+
+## Completeness, not just a fetch
+
+Socrata caps a response at `$limit` and returns 200 either way. Asking for 25,000 rows of a
+window holding 90,570 gives 25,000 rows and no error and the corpus is then defined by the
+limit rather than by the window.
+
+`ingest/fetch.py` asks a second question, `select count(1)` over the same predicate and
+refuses to write a partition whose row count disagrees:
+
+```
+2025-01-01   10873 rows    1672370 bytes  9cdce16f2bd7
+2025-01-02   13811 rows    2119078 bytes  af3e7dcc8aec
+...
+14 partitions, 179314 rows
+```
+
+The window is half open, `>= day` and `< day+1`. A closed window returns 10,878 rows for
+the first day against 10,873 and those 5 rows sit at exactly midnight. A closed window puts
+each of them in two partitions and the volume check then argues with itself.
+
+A count is not a checksum and the section on the second extract is what that costs. All
+fourteen partitions returned the same count on a later fetch and three of them returned
+different bytes.
+
+`data/raw` is not committed. `data/manifest.json` is, with a row count and a sha256 for
+every partition, so a copy that does not match the numbers above is something you can find
+out rather than something you have to trust.
+
+## Airflow and dbt cannot share an environment
+
+Measured with pip's own resolver rather than assumed:
+
+```
+pip install --dry-run --target <airflow env> dbt-core==1.12.3 dbt-duckdb
+```
+
+It succeeds. It also moves 21 packages that Airflow's constraints file had pinned, including
+`protobuf` from 4.25.8 to 6.33.6, `pydantic-core` from 2.41.5 to 2.46.4 and
+`opentelemetry-api` from 1.27.0 to 1.44.0. pip reports no conflict and Airflow is no longer
+the thing its own constraints describe.
+
+So `scripts/bootstrap-local.sh` installs into two directories and nothing imports across
+them. Airflow 3.1.8 with the matching constraints file, dbt-core 1.12.3 with dbt-duckdb
+1.9.4. No Docker, no root, no virtualenv tooling.
+
+`requirements.txt` holds one line, PyYAML. Airflow lives in `requirements-airflow.txt` and
+is needed only by `dags/`. A clone can run every check in `tests/` with the first file
+alone.
+
+## Lineage, read out of the models
+
+The picture above is typed. The warehouse half of it is also generated, and the generated
+one is the authority:
+
+```
+source:
+  raw.nyc311_service_requests
+
+level 1:
+  stg_service_requests <- raw.nyc311_service_requests
+
+level 2:
+  slv_service_requests <- stg_service_requests
+  snap_service_request <- stg_service_requests
+
+level 3:
+  dim_complaint_type <- slv_service_requests
+  gold_agency_daily <- slv_service_requests
+
+level 4:
+  gold_complaint_resolution <- dim_complaint_type, slv_service_requests
+```
+
+```
+python scripts/lineage.py --check
+the published lineage matches the models, 6 nodes
+```
+
+`docs/lineage.py` reads `ref()` and `source()` out of the model SQL and sorts the nodes by
+distance from the source. The dbt manifest would be the easier input and it is gitignored,
+so a picture built from it could not be rebuilt from a clone.
+
+Generating it was not a tidiness exercise. The typed diagram had `gold_complaint_resolution`
+sitting beside `gold_agency_daily` as though both hang off silver alone. It joins
+`dim_complaint_type` as well, for the agency list, which puts it a level further down. That
+edge had been missing from the picture for as long as the picture existed. A diagram cannot
+fail a test, so it never came up.
+
+The ingest path in the typed diagram has no generator behind it and stays typed. Contracts
+and quarantines are not a dbt graph and there is nothing to read them out of.
+
+The Airflow side runs end to end. `dags/nyc311_contract_check.py` pulls a partition and
+judges it. Then it writes the split, loads what passed and builds the models:
+
+```
+WDC_DUCKDB=/tmp/wh.duckdb bash scripts/dag_smoke.sh 2025-01-13
+
+ran 2025-01-13, tasks: pull check feed_checks load_raw transform
+13049 rows, 13003 accepted, 46 held, 364107 rule evaluations
+raw layer holds 13003 rows for 2025-01-13
+marts: gold.gold_agency_daily 187, gold.gold_complaint_resolution 156, silver.slv_service_requests 178742
+history: 178742 versions over 178742 keys, 0 superseded
+```
+
+Those mart counts are the whole warehouse and not the partition, so they depend on what was
+in the database before the run. Against a database built by `scripts/load_raw.py` first they
+are 187 and 156 and 178,742. Against an empty one the same command prints 13 and 121 and
+13,003, which is the one partition on its own and is not a failure. The line worth reading
+either way is the rule evaluation count, because that is the only one the run itself
+produced.
+
+Everything after the task list is asked of the database from outside the run. The load task
+already refuses a count it disagrees with and a task returning without raising is not the
+same fact as the rows being there. The marts are asked the same way, because a `dbt build`
+that exits zero having compiled nothing looks identical from the exit code.
+
+The `transform` task shells out to `scripts/dbt.sh`. That is not a shortcut. Airflow and
+dbt cannot share an install here, so an Airflow worker process cannot import dbt and a
+subprocess is the only shape available.
+
+That script exists because `airflow dags test` on a date outside the DAG's own start and
+end window creates a run, executes no task at all and reports `state=success`. A smoke
+test that greps for success passes on a run that did nothing and it keeps passing forever
+once the DAG's `end_date` falls behind the date it uses. So the script asserts each task
+name appears in the log and that the report says how many rules it evaluated.
+
+## The layers and one dimension that is deliberately not type 2
+
+```
+bash scripts/dbt.sh build
+
+Found 5 models, 1 snapshot, 30 data tests, 3 sources, 471 macros
+Done. PASS=36 WARN=0 ERROR=0 SKIP=0 NO-OP=0 REUSED=0 TOTAL=36
+```
+
+Staging is a view and everything below it is a table. Staging is a cast and a rename, so
+materialising it buys nothing.
+
+`stg_service_requests` puts types on the text. Every cast is a `try_` cast and
+`stg_cast_is_lossless` is what makes that safe. A row fails it when the raw text is present
+and the typed value is not, which is the signature of a cast that lost something. The
+contract already refused the values that would not convert. It did that upstream and in
+Python, before the load, so a hit here means either the contract missed a case or the cast
+disagrees with the rule that judged it. It has fired once and the section above is what it
+caught.
+
+`incident_zip` stays a string through every layer.
+
+`slv_service_requests` adds `resolution_minutes`, `resolution_hours`, `is_closed` and
+`has_location`. There is no deduplication step. `unique_key` is unique across all 178,742
+accepted rows and the contract enforces it. The quarantine holds both copies of anything
+that collides, so a `distinct` here would be a no-op that reads as rigour.
+
+`gold_agency_daily` is per agency per day. Its three status counts do not sum to the row
+count, on purpose. A request can be Assigned or Pending, which is neither open nor closed,
+and a two column split invites a reader to assume a partition of the whole. 808 of 178,742
+requests have no resolution time.
+
+`gold_complaint_resolution` carries `unresolved_count` beside the median for the same
+reason. The median only ever sees the rows that closed, so a complaint type with a fast
+median and a large unresolved count is not fast and a table without that column publishes
+survivor bias as performance.
+
+**`dim_complaint_type` is type 1 and the reason is a measurement.** Four of the 156
+complaint types are answered by two different agencies, which reads exactly like a routing
+change an SCD2 would capture. It is not one:
+
+```
+Encampment          DHS and NYPD, both agencies on all 14 days
+Graffiti            DSNY and NYPD, both on 13 of 14
+Highway Condition   DOT and DSNY, both on 10 of 14
+Asbestos            DEP and DOHMH, both on 5 of 10 days it appears
+```
+
+They are concurrent, not sequential. A type 2 dimension keyed on `complaint_type` would
+open and close a version every time the load order happened to put one agency ahead of the
+other and every version would be an artefact of sort order rather than a fact about the
+city. So the agencies are a sorted list on one row. A reader can see there are two and ask
+why. A version history would have told them there was a change, which is false.
+
+The type 2 table is on the request instead, because that is the only thing in this feed
+whose attributes were measured changing.
+
+## Every refusal, from a command line
+
+```
+python scripts/failing_run.py
+```
+
+A pipeline that refuses is only useful if you can see it refuse. Sixteen exception classes
+are defined across `contracts/`, `warehouse/` and `ingest/`, and this walks eight of them
+against a real partition in a scratch directory:
+
+```
+--- UnjudgedPartition ---
+    load data/raw directly, skipping the contract
+    UnjudgedPartition: data/raw holds no report.json, so nothing has judged what is in it
+
+--- LoadCountMismatch ---
+    load a directory whose report claims one row more than the file has
+    LoadCountMismatch: 2025-01-13 loaded 13003 rows, the report said 13004 were accepted
+
+--- MissingPartitions ---
+    backfill 2025-01-01 to 2025-01-14 with only one day judged
+    MissingPartitions: no judged directory for ['2025-01-01', ...], backfilling around a gap would publish a success with a hole in it
+
+--- ContractError ---
+    load the real contract with the provenance stripped off one rule
+    ContractError: column 'unique_key' is missing 'provenance'
+
+8 of 16 refusals demonstrated
+```
+
+The count on the last line is the reason the file exists. The sixteen come from reading
+`contracts/`, `warehouse/` and `ingest/` for classes that subclass an exception, so a
+refusal added tomorrow appears as undemonstrated rather than being quietly absent. A hand
+written list of failure modes covers what its author remembered.
+
+Each arm names the refusal it expects and fails when it gets a different one. That is not
+defensive coding. It is the defect this file shipped with. The `NothingChecked` arm called
+`profile` with the wrong argument and raised `AttributeError`. The run reported it as
+demonstrated and exited 0, because catching any exception and calling it a refusal is
+exactly how a probe reports a protection that never ran.
+
+Writing it also removed a refusal. `EmptyPlan` could not be reached. `backfill.days`
+refuses a reversed range first and returns at least one day for every other range, so the
+guard behind it had never run and nothing referenced the class. It is deleted rather than
+given a test, because a test for an unreachable branch pins the branch rather than the
+behaviour.
+
+## The README's own transcripts are checked
+
+```
+python scripts/readme_check.py
+51 fenced blocks, 32 of them transcripts
+30 run a script in this repo, 2 run something else
+180 output lines, 58 graded against a print in the source
+no drift, 58 graded lines all match
+```
+
+A block that shows a command and then its output is a claim about what the program prints,
+and nothing was checking it. `docs/blocks.py` reads the print statements out of the named
+script with `ast`, turns them into patterns and grades each published line against them.
+
+Read the counts before the verdict. It grades 58 of 180 lines, which is under a third.
+The rest are table rows and data, formatted through templates like `{:<12} {:>8}` that have
+almost no fixed text in them and could only be graded by re-running the command. A pass over
+58 lines is not a pass over the document and the count is printed so nobody reads it as one.
+
+The two ungradable blocks are the mutation commands, because `mutate.py` is not in this
+repo. Naming them beats silently skipping them, which is how a checker ends up reporting a
+clean run over nothing.
+
+It found three stale lines on the day it was written. Two had lost a comma in a prose edit
+and no longer matched the script that prints them. The third said the DAG runs four tasks
+and it has run five since the freshness checks landed.
+
+### What it catches, measured rather than asserted
+
+A check found by pointing it at three lines you already knew were stale proves very little.
+The threshold was chosen so those three came out above it, which is fitting a number to the
+cases in front of you. So the arm that can fail:
+
+```
+python scripts/readme_check.py --holdout
+207 damaged lines, 173 caught
+32 landed inside an argument, so the damaged line is still printable
+175 detectable, 173 caught, rate 0.989
+   missed, word dropped: 179314 rows 14 partitions
+   missed, word changed: 179314 rows elsewhere 14 partitions
+```
+
+Every line the check currently passes is broken four ways. A comma removed. A word dropped.
+A word changed. A word inserted. Read the second line of that output carefully, because it
+is the honest part.
+Thirty two of the damages land where a value goes, so the broken line is still something the
+program can print with different arguments. Counting those as misses would be asking the
+check to know what a number should be, and it cannot. That is the job of the separate rule
+about figures having a script behind them, not this one.
+
+Of the 175 damages that leave a line the program cannot produce, it catches 173. Both misses
+are the same line, `179314 rows over 14 partitions`, whose template has three fixed words.
+That is under the floor for recognising a line, so a badly enough damaged copy is claimed by
+nothing and passes as unrecognised rather than as wrong.
+
+### How the rule was arrived at
+
+The grading rule took three attempts and the first two failed the same way. Both decided
+whether a line belonged to a template by reading the template's text, so neither could claim
+a line whose drift was in that text. The lines most worth grading were the ones they skipped
+as unrecognised. Claiming is by shared vocabulary now, and the full pattern decides.
+
+The block above is itself a transcript, so the checker grades its own output. It cannot
+check those four numbers, because a number in a template is an argument and matches
+anything. It checks that the sentences are still the sentences it prints. Publishing them
+here also moved them, since three new blocks went in with these sections.
+
+## A lag is a difference and the clause named one side of it
+
+`freshness.max_lag_hours: 48` sat in this contract for days, unread by anything and it
+reads like a rule. Forty eight hours between what and what. Three answers are available and
+they are not close to each other. Here they are on the same fourteen partitions, from
+`scripts/feed_checks.py`.
+
+| reference | what it measures from | verdicts |
+|---|---|---|
+| `wall_clock`, every partition | now | 14 stale |
+| `wall_clock`, tail only | now | 1 stale, 13 not applicable |
+| `partition_end`, every partition | the end of the partition's own day | 14 ok, every lag 0.0h |
+| `extract`, tail only | the moment the fetch ran | 1 stale, 13 not applicable |
+
+Same data, same threshold and the answer is 14 refusals or 1 or none depending on which
+reading the implementer happened to pick. So `reference` is now a field and
+`contracts/spec.py` refuses a contract without it, the same way it refuses one without
+`provenance`.
+
+`partition_end` is in the list to be rejected rather than because anyone should use it. A
+partition cannot hold an event after its own day ends, so that lag cannot exceed one grain
+and it came back 0.0h on all fourteen. It is the reading that can never fail.
+
+`wall_clock` is what people mean and it is a statement about a live feed. Pointed at an
+archive it returns the age of the archive, which is true and useless. `extract` measures
+from the fetch instead, so it does not drift while the file sits on disk. That needs a fetch
+time and nothing was recording one. `ingest/fetch.py` writes `fetched_at` into the manifest
+now and the partitions written before that line existed return `no_extract_time` rather
+than `ok`. A check with no input has to refuse. Passing is the wrong answer and it is the
+easy one.
+
+### Scope is doing more work than the reference
+
+The second field is `applies_to` and it is the one that stops the rule being useless. A
+freshness clause is a statement about the tail of a feed. A backfill re-reads history, so
+every partition it touches is old and a rule applied to all of them fires on all of them.
+Under `every_partition` this clause refuses all fourteen. A guardrail that refuses
+everything correct gets switched off and then it protects nothing.
+
+`tail` is not a full answer either and the limit is visible in the table above. It means
+newest in the manifest rather than newest in the feed, so a backfill still reads stale on
+its own last partition. What it stops is thirteen duplicates of that one alert.
+
+### The clause is not vacuous and one fetch is what shows it
+
+Fourteen archive partitions refusing under every reading that is not `partition_end` is
+indistinguishable from a broken check. `scripts/live_feed_probe.py` fetches one recent day
+and one archive day into a temporary directory and reads both.
+
+```
+freshness  limit 48h  reference extract
+  recent  2026-08-30  rows   1121  newest 2026-08-30 02:31:07  lag     37.00h  ok
+  archive 2025-01-14  rows  10079  newest 2025-01-14 23:59:43  lag  14247.52h  stale
+```
+
+So the rule can pass. The asserted 48 hours was never checked against the feed and it turns
+out to clear the feed's real publishing lag by about eleven hours.
+
+## The floor that could not fire and the first live day that tripped it
+
+`volume.min_rows_per_partition` is 4,000 and the smallest partition in the corpus holds
+10,079. The floor sits 6,079 rows below anything ever observed, a ratio of 2.52, so it
+cannot bind. It is still 4,000. Raising it to a number that can fire would mean choosing it
+by looking at the fourteen partitions it is about to judge and `scripts/feed_checks.py`
+prints the distance instead of hiding it.
+
+What a fitted floor would cost, from the same script, nine partitions to train and five held
+back:
+
+```
+  median 13574  mad 1332  floor at median minus 3.0x mad 9578
+  out of sample fires 0 of 5, rate 0.000
+  smallest rate this holdout can report at all: 0.200
+```
+
+A rate measured on five partitions comes in fifths. Any gate below 0.2 cannot be measured
+against this corpus at any effect size, so a fitted floor here would be a number with no way
+to check it. The corpus is too short and that is the answer rather than a worse floor.
+
+Then the same clause against the live feed, from `scripts/live_feed_probe.py`:
+
+```
+  2026-08-27     10028  2026-08-27T23:59:58.000 Thu  ok
+  2026-08-28     10765  2026-08-28T23:59:56.000 Fri  ok
+  2026-08-29      9009  2026-08-29T23:59:53.000 Sat  ok
+  2026-08-30      1121  2026-08-30T02:31:07.000 Sun  below_floor
+  2026-08-31         0  none                    Mon  below_floor
+
+  floor 4000 fired on 2 of 15 live days
+```
+
+Thirteen settled days run 9,009 to 11,665 rows and every one ends at 23:59. The two that
+fire end early or hold nothing, because the feed publishes more than a day behind and those
+days are still being written. The floor that cannot bind on any of fourteen archive
+partitions binds on the first live partition anyone fetched.
+
+That is not a lucky threshold. The corpus is fourteen consecutive complete January days and
+it contains no example of the thing the floor was written to catch. Running a guardrail over
+data that cannot break it says nothing about the guardrail.
+
+Two things follow. The completeness guard in `ingest/fetch.py` refuses a partition unless
+the API's own `count(1)` matches the fetch and on 2026-08-30 it agreed at 1,121. It proves
+the transfer was complete and it has no opinion about whether the source was. And freshness
+passed that same partition at 37.00h against a 48h limit while volume refused it, which is
+the whole difference between the two clauses. One asks when the data arrived. Neither of
+them asks whether all of it did and only volume notices by accident.
+
+## The contract generates nine of its twenty three constraints
+
+`scripts/generate_dbt_tests.py` writes `dbt/models/staging/_generated.yml` from
+`contracts/nyc311.yml`.
+
+```
+23 contract constraints
+  generated              9
+  no_dbt_equivalent      9
+  nothing_to_generate    5
+  reaching dbt: 9 of 23, 39.1%
+```
+
+dbt core ships four generic tests and nothing here installs a package, so that is the whole
+vocabulary. Presence, uniqueness and vocabulary survive the trip. Every rule that reads the
+shape of a value has no equivalent, which is one `max_length`, one regex and four range
+bounds. So does every rule that reads two columns, which is all three cross column checks.
+The five that generate nothing are nullable columns, where `required: false` asserts nothing
+and emitting `not_null` would refuse every open request in the feed.
+
+The denominator comes out of the contract rather than a list kept beside the mapper and
+`tests/test_generate.py` drives itself off `spec.COLUMN_RULES` so a rule added to the format
+and forgotten in the mapper fails rather than quietly improving the percentage.
+
+### Running the generated tests against the accepted rows proves nothing
+
+They pass. `bash scripts/dbt.sh build` is `PASS=36 ERROR=0` over 30 data tests. That result
+is worth nothing, because the accepted table is what came out of the quarantine and a test
+on it can only confirm the split did what the splitter said.
+
+So `scripts/generated_tests_probe.py` points dbt's own compiled SQL at the other side, the
+572 rows the validator refused.
+
+```
+572 quarantined rows over 14 partitions
+  closed_request_has_a_closed_date:check:requires_when 493
+  open_request_has_no_closed_date:check:forbids_when 67
+  closed_after_created:check:ordering and open_request_has_no_closed_date:...  12
+
+9 of 9 generated tests find nothing in the held rows
+```
+
+Every one of the 572 was held by a cross column check and no cross column check has a dbt
+equivalent. So the nine constraints that reach dbt are exactly the nine that have never
+refused a row here and the three that refused all 572 are in the pile dbt cannot express.
+Generating the tests from the contract ships the half of the contract with nothing to say.
+
+Nine tests all coming back silent is also what a probe pointed at an empty table looks like.
+The probe poisons two rows and requires two named tests to notice before it will report
+anything.
+
+```
+control, two poisoned rows added to the probe table
+  not_null_agency                                            1
+  accepted_values_contrac_9eefa1db368cfbdb2ae0ff60effd4a96   2
+  control passed, so the silence above is the data and not the probe
+```
+
+The reason to generate them at all is the subject rather than the rule. The validator reads
+the CSV before the load and dbt reads the table after it and this repo has already lost two
+arguments in the gap between those two. A zip starting with a zero passes the five digit
+rule on the file and fails it in a table whose reader chose an integer. A directory name
+overwrote the column it names on every row without a single count moving. One rule evaluated
+at two points is a check with something to say. It is not redundancy and it is not
+validation either.
+
+Generation also moves the two copies problem rather than removing it. The status vocabulary
+used to live in the contract and again in a hand written yml. It now lives in the contract
+and again in a generated file and `scripts/generate_dbt_tests.py --check` plus a check in
+`tests/test_generate.py` is what stops those drifting.

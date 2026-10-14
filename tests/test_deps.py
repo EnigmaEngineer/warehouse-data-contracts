@@ -11,6 +11,9 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from docs import published  # noqa: E402
 
 # Distribution name on the left, imported module name on the right. They differ often
 # enough that mapping them by stripping a suffix is guesswork.
@@ -95,8 +98,7 @@ def check_the_dbt_version_lives_in_one_place_and_is_published_in_the_other():
     assert SUBPROCESS_REQUIREMENTS in script, \
         "bootstrap-local.sh does not read {}".format(SUBPROCESS_REQUIREMENTS)
 
-    with open(os.path.join(ROOT, "README.md")) as fh:
-        readme = fh.read()
+    readme = published.read(ROOT)
 
     pinned = [line.strip() for line in open(path)
               if line.strip() and not line.startswith("#")]
@@ -107,7 +109,7 @@ def check_the_dbt_version_lives_in_one_place_and_is_published_in_the_other():
         assert version not in script, \
             "{} is pinned in the requirements file and in the script".format(dist)
         assert version in readme, \
-            "the README does not say which {} it runs on".format(dist)
+            "the published docs do not say which {} they run on".format(dist)
 
 
 def third_party(names):

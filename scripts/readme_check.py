@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the README's transcripts against the programs that print them.
+"""Check the published transcripts against the programs that print them.
 
 Exits 1 when a published output line no longer matches anything its script can say.
 """
@@ -10,12 +10,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from docs import blocks
+from docs import blocks, published
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--doc", default="README.md")
+    parser.add_argument("--doc", default=None,
+                        help="one file to check. Default is every published doc")
     parser.add_argument("--root", default=".")
     parser.add_argument("--show-ungraded", action="store_true",
                         help="list the output lines nothing claimed")
@@ -23,8 +24,11 @@ def main():
                         help="damage every graded line and count what comes back")
     args = parser.parse_args()
 
-    with open(args.doc, encoding="utf-8") as handle:
-        text = handle.read()
+    if args.doc is None:
+        text = published.read(args.root)
+    else:
+        with open(args.doc, encoding="utf-8") as handle:
+            text = handle.read()
 
     if args.holdout:
         held = blocks.holdout(text, args.root)

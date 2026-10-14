@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
-from docs import blocks, lineage  # noqa: E402
+from docs import blocks, lineage, published  # noqa: E402
 
 
 DOC = """
@@ -298,10 +298,9 @@ def check_the_shipped_lineage_matches_the_shipped_readme():
     """The check the script runs, run here too, so a model change fails the suite."""
     project = os.path.join(ROOT, "dbt")
     graph = lineage.nodes(project)
-    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
-        text = fh.read()
+    text = published.read(ROOT)
     block = lineage.published(text, "## Lineage, read out of the models")
-    assert block is not None, "the README has no lineage block"
+    assert block is not None, "the published docs have no lineage block"
     assert block == lineage.render(graph, lineage.sources(project))
 
 
@@ -313,8 +312,7 @@ def check_damaged_lines_are_caught_at_the_published_rate():
     floor is set under today's 169 of 171 rather than at it, because the corpus grows as
     the README does and pinning an exact count would fail on the next paragraph.
     """
-    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
-        text = fh.read()
+    text = published.read(ROOT)
     held = blocks.holdout(text, ROOT)
     assert held["total"] > 150, held["total"]
     assert held["detectable"] > 120, held["detectable"]
@@ -336,8 +334,7 @@ def check_a_damage_landing_in_an_argument_is_not_counted_as_a_miss():
 
 
 def check_the_shipped_readme_has_no_drifted_transcript():
-    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
-        text = fh.read()
+    text = published.read(ROOT)
     result = blocks.report(text, ROOT)
     assert result["drifted"] == [], [
         (line, t.literal) for _, line, t in result["drifted"]]
