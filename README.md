@@ -1045,8 +1045,8 @@ A word changed. A word inserted. Read the second line of that output carefully, 
 is the honest part.
 Thirty two of the damages land where a value goes, so the broken line is still something the
 program can print with different arguments. Counting those as misses would be asking the
-check to know what a number should be, and it cannot. That is the job of the thread about
-figures having a script behind them, not this one.
+check to know what a number should be, and it cannot. That is the job of the separate rule
+about figures having a script behind them, not this one.
 
 Of the 175 damages that leave a line the program cannot produce, it catches 173. Both misses
 are the same line, `179314 rows over 14 partitions`, whose template has three fixed words.
